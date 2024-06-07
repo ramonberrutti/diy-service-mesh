@@ -1,0 +1,214 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: service-mesh
+
+---
+apiVersion: "v1"
+kind: ServiceAccount
+metadata:
+  name: service-mesh-injector
+  namespace: service-mesh
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: service-mesh-admission
+  namespace: service-mesh
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: service-mesh-admission
+  namespace: service-mesh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: service-mesh-admission
+subjects:
+- kind: ServiceAccount
+  name: service-mesh-injector
+  namespace: service-mesh
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: service-mesh-admission
+rules:
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["mutatingwebhookconfigurations"]
+  verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: service-mesh-admission
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: service-mesh-admission
+subjects:
+- kind: ServiceAccount
+  name: service-mesh-injector
+  namespace: service-mesh
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-mesh-injector
+  namespace: service-mesh
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: service-mesh-injector
+  template:
+    metadata:
+      labels:
+        app: service-mesh-injector
+    spec:
+      containers:
+      - name: service-mesh-injector
+        image: diy-sm-injector
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: TLS_CERT_FILE
+          value: /certs/tls.crt
+        - name: TLS_KEY_FILE
+          value: /certs/tls.key
+        # will be replaced by tilt
+        - name: IMAGE_TO_DEPLOY_PROXY
+          value: diy-sm-proxy:latest
+        # will be replaced by tilt
+        - name: IMAGE_TO_DEPLOY_PROXY_INIT
+          value: diy-sm-proxy-init:latest
+        ports:
+        - containerPort: 8443
+        volumeMounts:
+        - name: webhook-certs
+          mountPath: /certs
+          readOnly: true
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: service-mesh-injector-certs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-mesh-injector
+  namespace: service-mesh
+spec:
+  ports:
+  - port: 443
+    targetPort: 8443
+  selector:
+    app: service-mesh-injector
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: injector-admission-create
+  namespace: service-mesh
+spec:
+  template:
+    metadata:
+      name: injector-admission-create
+    spec:
+      containers:
+      - args:
+        - create
+        - --host=service-mesh-injector,service-mesh-injector.$(POD_NAMESPACE).svc
+        - --namespace=$(POD_NAMESPACE)
+        - --secret-name=service-mesh-injector-certs
+        - --cert-name=tls.crt
+        - --key-name=tls.key
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        image: registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.4.1@sha256:36d05b4077fb8e3d13663702fa337f124675ba8667cbd949c03a8e8ea6fa4366
+        imagePullPolicy: IfNotPresent
+        name: create
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          seccompProfile:
+            type: RuntimeDefault
+      restartPolicy: OnFailure
+      serviceAccountName: service-mesh-injector
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: injector-admission-patch
+  namespace: service-mesh
+spec:
+  template:
+    metadata:
+      name: injector-admission-patch
+    spec:
+      containers:
+      - args:
+        - patch
+        - --webhook-name=service-mesh-injector-webhook
+        - --namespace=$(POD_NAMESPACE)
+        - --patch-validating=false
+        - --patch-mutating=true
+        - --secret-name=service-mesh-injector-certs
+        - --patch-failure-policy=Fail
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        image: registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.4.1@sha256:36d05b4077fb8e3d13663702fa337f124675ba8667cbd949c03a8e8ea6fa4366
+        imagePullPolicy: IfNotPresent
+        name: patch
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          seccompProfile:
+            type: RuntimeDefault
+      restartPolicy: OnFailure
+      serviceAccountName: service-mesh-injector
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: service-mesh-injector-webhook
+webhooks:
+- name: service-mesh-injector.service-mesh.svc
+  clientConfig:
+    service:
+      name: service-mesh-injector
+      namespace: service-mesh
+      path: "/inject"
+  objectSelector:
+    matchLabels:
+      service-mesh: enabled
+  rules:
+  - operations: ["CREATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+  timeoutSeconds: 5
+  

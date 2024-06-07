@@ -1,0 +1,34 @@
+syntax = "proto3";
+package sm.v1;
+
+service ServiceMeshService {
+  rpc GetUpstreams(UpstreamRequest) returns (stream UpstreamResponse) {}
+}
+
+message UpstreamRequest {
+  string serviceName = 1;
+}
+
+message UpstreamResponse {
+  repeated Service services = 1;
+}
+
+message Service {
+  message Port {
+    string name = 1;
+    int32 port = 2;
+    string protocol = 3;
+  }
+
+  string name = 1;
+  repeated Port ports = 2;
+  repeated string cluster_ips = 3;
+  repeated Endpoint endpoints = 4;
+}
+
+message Endpoint {
+  string address = 1;
+  int32 port = 2;
+  string protocol = 3;
+  bool ready = 4;
+}
