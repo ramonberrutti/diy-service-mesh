@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"os/signal"
 	"time"
@@ -13,9 +13,7 @@ import (
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-
-	httpClient := &http.Client{}
-
+	n := 0
 	// This application will call the `app-b` every second
 	ticker := time.NewTicker(time.Second)
 	for {
@@ -28,15 +26,20 @@ func main() {
 				panic(err)
 			}
 
-			resp, err := httpClient.Do(req)
+			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				panic(err)
 			}
 
-			body, _ := io.ReadAll(resp.Body)
-			fmt.Printf("Response status code: %d, body: %s\n", resp.StatusCode, body)
-
+			dump, err := httputil.DumpResponse(resp, true)
+			if err != nil {
+				panic(err)
+			}
 			resp.Body.Close()
+
+			n++
+			fmt.Printf("Response #%d\n", n)
+			fmt.Println(string(dump))
 		}
 	}
 }

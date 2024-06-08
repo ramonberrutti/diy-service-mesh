@@ -2,7 +2,16 @@ syntax = "proto3";
 package sm.v1;
 
 service ServiceMeshService {
+  rpc GetServices(GetServicesRequest) returns (GetServicesResponse) {}
   rpc GetUpstreams(UpstreamRequest) returns (stream UpstreamResponse) {}
+}
+
+message GetServicesRequest {
+  repeated string services = 1;
+}
+
+message GetServicesResponse {
+  repeated Service services = 1;
 }
 
 message UpstreamRequest {
@@ -17,18 +26,31 @@ message Service {
   message Port {
     string name = 1;
     int32 port = 2;
-    string protocol = 3;
+    int32 target_port = 3;
+    string protocol = 4;
+  }
+
+  message Endpoint {
+    repeated string addresses = 1;
+    bool ready = 2;
+    // We are ignoring serving and terminating for now
+    string pod_name = 3;
+  }
+
+  message Canary {
+    string name = 1;
+    string namespace = 2; // Empty string means the same namespace as the service
+    int32 port = 3; // Empty string means the same port as the service
+    int32 weight = 4; // 0-100
   }
 
   string name = 1;
-  repeated Port ports = 2;
-  repeated string cluster_ips = 3;
-  repeated Endpoint endpoints = 4;
-}
+  string namespace = 2;
+  repeated Port ports = 3;
+  repeated string cluster_ips = 4;
+  repeated Endpoint endpoints = 5;
+  repeated Canary canaries = 6;
 
-message Endpoint {
-  string address = 1;
-  int32 port = 2;
-  string protocol = 3;
-  bool ready = 4;
+  // deleted
+  bool deleted = 7;
 }

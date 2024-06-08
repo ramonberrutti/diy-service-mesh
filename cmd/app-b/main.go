@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/rand"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -18,8 +21,28 @@ func main() {
 
 	failRate, _ := strconv.Atoi(os.Getenv("FAIL_RATE"))
 
+	n := uint64(0)
+	hostname := os.Getenv("HOSTNAME")
+	version := os.Getenv("VERSION")
+
+	var b bytes.Buffer
+	b.WriteString("Hello from app-b service! Hostname: ")
+	b.WriteString(hostname)
+	b.WriteString(" Version: ")
+	b.WriteString(version)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
+		// Dump the request
+		dump, err := httputil.DumpRequest(r, true)
+		if err != nil {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			fmt.Println("Failed to process request")
+			return
+		}
+		fmt.Printf("Request #%d\n", atomic.AddUint64(&n, 1))
+		fmt.Println(string(dump))
+
 		// Simulate failure
 		if failRate > 0 {
 			// Get a random number between 0 and 100
@@ -31,8 +54,9 @@ func main() {
 			}
 		}
 
-		w.Write([]byte("Hello from app-b service! Version: " + os.Getenv("VERSION")))
-		fmt.Println("Processed request")
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write(b.Bytes())
 	})
 
 	server := &http.Server{

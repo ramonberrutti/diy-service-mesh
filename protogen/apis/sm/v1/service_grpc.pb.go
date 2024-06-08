@@ -19,6 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
+	ServiceMeshService_GetServices_FullMethodName  = "/sm.v1.ServiceMeshService/GetServices"
 	ServiceMeshService_GetUpstreams_FullMethodName = "/sm.v1.ServiceMeshService/GetUpstreams"
 )
 
@@ -26,6 +27,7 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ServiceMeshServiceClient interface {
+	GetServices(ctx context.Context, in *GetServicesRequest, opts ...grpc.CallOption) (*GetServicesResponse, error)
 	GetUpstreams(ctx context.Context, in *UpstreamRequest, opts ...grpc.CallOption) (ServiceMeshService_GetUpstreamsClient, error)
 }
 
@@ -35,6 +37,15 @@ type serviceMeshServiceClient struct {
 
 func NewServiceMeshServiceClient(cc grpc.ClientConnInterface) ServiceMeshServiceClient {
 	return &serviceMeshServiceClient{cc}
+}
+
+func (c *serviceMeshServiceClient) GetServices(ctx context.Context, in *GetServicesRequest, opts ...grpc.CallOption) (*GetServicesResponse, error) {
+	out := new(GetServicesResponse)
+	err := c.cc.Invoke(ctx, ServiceMeshService_GetServices_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *serviceMeshServiceClient) GetUpstreams(ctx context.Context, in *UpstreamRequest, opts ...grpc.CallOption) (ServiceMeshService_GetUpstreamsClient, error) {
@@ -73,6 +84,7 @@ func (x *serviceMeshServiceGetUpstreamsClient) Recv() (*UpstreamResponse, error)
 // All implementations should embed UnimplementedServiceMeshServiceServer
 // for forward compatibility
 type ServiceMeshServiceServer interface {
+	GetServices(context.Context, *GetServicesRequest) (*GetServicesResponse, error)
 	GetUpstreams(*UpstreamRequest, ServiceMeshService_GetUpstreamsServer) error
 }
 
@@ -80,6 +92,9 @@ type ServiceMeshServiceServer interface {
 type UnimplementedServiceMeshServiceServer struct {
 }
 
+func (UnimplementedServiceMeshServiceServer) GetServices(context.Context, *GetServicesRequest) (*GetServicesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetServices not implemented")
+}
 func (UnimplementedServiceMeshServiceServer) GetUpstreams(*UpstreamRequest, ServiceMeshService_GetUpstreamsServer) error {
 	return status.Errorf(codes.Unimplemented, "method GetUpstreams not implemented")
 }
@@ -93,6 +108,24 @@ type UnsafeServiceMeshServiceServer interface {
 
 func RegisterServiceMeshServiceServer(s grpc.ServiceRegistrar, srv ServiceMeshServiceServer) {
 	s.RegisterService(&ServiceMeshService_ServiceDesc, srv)
+}
+
+func _ServiceMeshService_GetServices_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetServicesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ServiceMeshServiceServer).GetServices(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ServiceMeshService_GetServices_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ServiceMeshServiceServer).GetServices(ctx, req.(*GetServicesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _ServiceMeshService_GetUpstreams_Handler(srv interface{}, stream grpc.ServerStream) error {
@@ -122,7 +155,12 @@ func (x *serviceMeshServiceGetUpstreamsServer) Send(m *UpstreamResponse) error {
 var ServiceMeshService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "sm.v1.ServiceMeshService",
 	HandlerType: (*ServiceMeshServiceServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetServices",
+			Handler:    _ServiceMeshService_GetServices_Handler,
+		},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "GetUpstreams",

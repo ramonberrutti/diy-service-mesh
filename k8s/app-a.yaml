@@ -22,23 +22,7 @@ spec:
         app: app-a
         service-mesh: enabled
     spec:
-      # initContainers:
-      # - name: proxy-init
-      #   image: diy-sm-proxy-init
-      #   imagePullPolicy: IfNotPresent
-      #   securityContext:
-      #     capabilities:
-      #       add:
-      #         - NET_ADMIN
-      #         - NET_RAW
-      #       drop:
-      #         - ALL
       containers:
-      # - name: proxy
-      #   image: diy-sm-proxy
-      #   imagePullPolicy: IfNotPresent
-      #   securityContext:
-      #     runAsUser: 1337
       - name: app-a
         image: diy-sm-app-a
         imagePullPolicy: IfNotPresent
