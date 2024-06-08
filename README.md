@@ -471,4 +471,229 @@ Some important points:
 
 
 Doing this is not so simple, we want to kubernetes inject the proxy and proxy-init containers in the pod for us.
-Here is where the `Admission Controller` comes in.
+Here is where the `Admission Controller` comes in. Learn more about it [here](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/).
+
+## Creating the Admission Controller
+
+Before kube-apiserver persists the object, it sends the object to the Admission Controller, and we can patch the object before it is persisted.
+
+The code is a bit extensive, but we are going to explain the important parts:
+
+```go
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	var certFile, keyFile = os.Getenv("TLS_CERT_FILE"), os.Getenv("TLS_KEY_FILE")
+	if certFile == "" || keyFile == "" {
+		panic("CERT_FILE and KEY_FILE must be set")
+	}
+
+	// Mutate webhook.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/inject", func(w http.ResponseWriter, r *http.Request) {
+		var a admissionv1.AdmissionReview
+		if err := json.NewDecoder(r.Body).Decode(&a); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if a.Request == nil {
+			http.Error(w, "missing request", http.StatusBadRequest)
+			return
+		}
+
+		a.Response = mutate(&a)
+		a.Request = nil
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(a); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+
+	server := &http.Server{
+		Addr:    ":8443",
+		Handler: mux,
+	}
+
+	g, ctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		<-ctx.Done()
+		return server.Shutdown(context.Background())
+	})
+
+	g.Go(func() error {
+		return server.ListenAndServeTLS(certFile, keyFile)
+	})
+
+	if err := g.Wait(); err != nil {
+		if err != http.ErrServerClosed {
+			panic(err)
+		}
+	}
+}
+
+func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+	req := ar.Request
+	if req.Operation != admissionv1.Create || req.Kind.Kind != "Pod" {
+		return &admissionv1.AdmissionResponse{
+			UID:     req.UID,
+			Allowed: true,
+		}
+	}
+
+	var pod v1.Pod
+	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
+		return &admissionv1.AdmissionResponse{
+			UID: req.UID,
+			Result: &metav1.Status{
+				Message: err.Error(),
+			},
+		}
+	}
+
+	// Add the initContainer to the pod.
+	pod.Spec.InitContainers = append(pod.Spec.InitContainers, v1.Container{
+		Name:            "proxy-init",
+		Image:           os.Getenv("IMAGE_TO_DEPLOY_PROXY_INIT"),
+		ImagePullPolicy: v1.PullAlways,
+		SecurityContext: &v1.SecurityContext{
+			Capabilities: &v1.Capabilities{
+				Add:  []v1.Capability{"NET_ADMIN", "NET_RAW"},
+				Drop: []v1.Capability{"ALL"},
+			},
+		},
+	})
+
+	// Add the sidecar container to the pod.
+	pod.Spec.Containers = append(pod.Spec.Containers, v1.Container{
+		Name:            "proxy",
+		Image:           os.Getenv("IMAGE_TO_DEPLOY_PROXY"),
+		ImagePullPolicy: v1.PullAlways,
+		SecurityContext: &v1.SecurityContext{
+			RunAsUser:    func(i int64) *int64 { return &i }(1337),
+			RunAsNonRoot: func(b bool) *bool { return &b }(true),
+		},
+	})
+
+	patch := []map[string]any{
+		{
+			"op":    "replace",
+			"path":  "/spec/initContainers",
+			"value": pod.Spec.InitContainers,
+		},
+		{
+			"op":    "replace",
+			"path":  "/spec/containers",
+			"value": pod.Spec.Containers,
+		},
+	}
+
+	podBytes, err := json.Marshal(patch)
+	if err != nil {
+		return &admissionv1.AdmissionResponse{
+			UID: req.UID,
+			Result: &metav1.Status{
+				Message: err.Error(),
+			},
+		}
+	}
+
+	patchType := admissionv1.PatchTypeJSONPatch
+	return &admissionv1.AdmissionResponse{
+		UID:     req.UID,
+		Allowed: true,
+		AuditAnnotations: map[string]string{
+			"proxy-injected": "true",
+		},
+		Patch:     podBytes,
+		PatchType: &patchType,
+	}
+}
+```
+
+Some important points:
+
+- We create an https server to receive the requests from the kube-apiserver and return the patched object.
+- The https is necessary because the kube-apiserver only sends the objects to the Admission Controller using https.
+- IMAGE_TO_DEPLOY_PROXY_INIT and IMAGE_TO_DEPLOY_PROXY are the environment variables that we are going to set in the deployment. We are using like this so `tilt` can inject the correct image.
+
+## Deploying the Admission Controller
+
+This is a tricky part, we need to create a `MutatingWebhookConfiguration` to tell the kube-apiserver to send the objects to our Admission Controller.
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: service-mesh-injector-webhook
+webhooks:
+- name: service-mesh-injector.service-mesh.svc
+  clientConfig:
+    service:
+      name: service-mesh-injector
+      namespace: service-mesh
+      path: "/inject"
+  objectSelector:
+    matchLabels:
+      service-mesh: enabled
+  rules:
+  - operations: ["CREATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+  timeoutSeconds: 5
+```
+
+Some important points:
+
+- We are missing the `caBundle` in the `clientConfig`, this is the certificate of the Admission Controller, but we are using `kube-webhook-certgen` to generate it.
+- We are using the `objectSelector` to tell the kube-apiserver to send the objects to the Admission Controller only if the label `service-mesh: enabled` is present in the pod.
+- We are using the `rules` to tell the kube-apiserver to send the objects to the Admission Controller only if the operation is `CREATE` and the resource is `pods`.
+
+Check the [injector.yaml](./k8s/injector.yaml) file to see the complete configuration.
+
+## Testing the Admission Controller
+
+We can deploy the `app-a` and `app-b` services with the `service-mesh: enabled` label and check if the proxy and proxy-init containers are injected in the pod.
+
+```yaml
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: app-a
+  template:
+    metadata:
+      labels:
+        app: app-a
+        service-mesh: enabled
+    spec:
+```
+
+We can also use annotations, but to keep it simple we are using labels.
+
+## Controller
+
+The controller is going to watch all the services and endpointsslices in the cluster and update the proxy configuration.
+
+This is very similar of how the `kube-proxy` works. The job of kube-proxy is to watch the services and 
+endpoints in the cluster and update the iptables rules to forward the traffic to the correct pod.
+In our case, we don't want that the proxy container watch directly the services and endpointsslices. (Security reasons and performance)
+
+The controller is also going to manage the canary traffic.
+
+### Comunication between the controller and the proxy
+
+We are going to use gRPC to communicate between the controller and the proxy.
+
+As mention before, the controller is going to watch the services and endpointsslices and push the configuration to the proxy.
+
+```go
+
+```
+
+
