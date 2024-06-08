@@ -1,6 +1,6 @@
 # DIY Service Mesh
 
-This is a Do-It-Yourself Service Mesh, which is a learning platform for understanding 
+This is a Do-It-Yourself Service Mesh, which is a simple tutorial for understanding 
 the internals of a service mesh. The goal of this project is to provide a simple, 
 easy-to-understand reference implementation of a service mesh, which can be used 
 to learn about the various concepts and technologies used in a service mesh.
@@ -18,19 +18,19 @@ to learn about the various concepts and technologies used in a service mesh.
 - This is only for learning propose, not a production-ready service mesh.
 - We are going to use IPTables instead of eBPF or Nftables for simplicity.
 - We are going to keep the code as simple as possible to make it easy to understand.
-
+- Some Golang errors are ignored for simplicity, in a real-world scenario you should handle them properly.
 
 ## What are we going to build?
 
 We are going to keep the project in a monorepo, which will contain the following components:
 
-- **init-container**: This is an init container that we are going to use to configure the network namespace of the pods.
-- **data-plane**: This is the data plane of the service mesh, which is responsible for intercepting and modifying network packets.
-- **control-plane**: This is the control plane of the service mesh, which is responsible for managing the data plane.
-- **admission-controller**: This is an Admission Controller for Kubernetes, which is responsible for validating and mutating Kubernetes resources.
-- **sample-app**: This is a sample application that we are going to use to test the service mesh with different scenarios.
+- **proxy-init**: Configure the network namespace of the pod.
+- **proxy**: This is the data plane of the service mesh, which is responsible for intercepting and modifying network packets.
+- **controller**: This is the control plane of the service mesh, which is responsible to provide the configuration to the data plane.
+- **injector**: This is an Admission Controller for Kubernetes, which is responsible for mutating each pod that we want to use the service mesh.
+- **samples apps**: Two simple applications that are going to communicate with each other.
 
-## How to run this project?
+## Tools and how to run this project?
 
 We are going to use:
 
@@ -43,19 +43,19 @@ We are going to use:
 To start all the components, run the following command:
 
 ```bash
+kind create cluster
 tilt up
 ```
 
-Will build all the images and deploy all the components to the Kubernetes cluster.
+Tilt will build all the images and deploy all the components to the Kubernetes cluster.
 
+The main branch contains the final version of the project.
 
 ## Architecture
 
 The architecture of the service mesh is composed of the following components:
 
 ![Architecture](./docs/images/architecture.png)
-
-
 
 ## Creating the applications
 
