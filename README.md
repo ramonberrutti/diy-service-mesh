@@ -242,7 +242,11 @@ func main() {
 			go func(c net.Conn) {
 				defer c.Close()
 
-				destPort := "" // WE ARE GOING TO MODIFY THIS PART IN THE NEXT STEP
+				destPort, err := originalPort(c)
+				if err != nil {
+					fmt.Printf("Failed to get original destination: %v\n", err)
+					return
+				}
 
 				// Read the request
 				req, err := http.ReadRequest(bufio.NewReader(c))
@@ -695,5 +699,94 @@ As mention before, the controller is going to watch the services and endpointssl
 ```go
 
 ```
+
+
+## Identity
+
+We want to know who is calling who, so we are going to use mTLS between the services.
+But? How we are going to do this?
+
+First we need to understand how the proxy can authenticate with the controller.
+
+Kubernetes has a feature called `ServiceAccount` that is a way to authenticate the pods with the Kubernetes API.
+If requested, kubernetes creates a token and mounts it in the pod, so the pod can authenticate with the Kubernetes API.
+
+For example:
+```yaml
+  volumes:
+  - name: proxy-token
+    projected:
+      defaultMode: 420
+      sources:
+      - serviceAccountToken:
+          audience: diy-service-mesh
+          expirationSeconds: 3600
+          path: token
+```
+
+We explicitly set the `audience` to `diy-service-mesh`, so the token can only be used to authenticate with the `diy-service-mesh` service.
+
+We can mount the token in the proxy container and use it to authenticate with the controller.
+
+```yaml
+    volumeMounts:
+    - mountPath: /var/run/secrets/diy-service-mesh
+      name: proxy-token
+      readOnly: true
+```
+
+If we inspect the token, we can see that it is a JWT token.
+
+```bash
+kubectl exec -it -n app-b pod/app-b-799c77dc9b-6x2s6 -c proxy -- sh -c 'cat /var/run/secrets/diy-service-mesh/token | cut -d "." -f 2 | base64 -d'
+```json
+{
+  "aud": [
+    "diy-service-mesh"
+  ],
+  "exp": 1718039421,
+  "iat": 1718035821,
+  "iss": "https://kubernetes.default.svc.cluster.local",
+  "kubernetes.io": {
+    "namespace": "app-b",
+    "pod": {
+      "name": "app-b-799c77dc9b-6x2s6",
+      "uid": "6e50d207-84b0-4778-b203-fef3abfda9fd"
+    },
+    "serviceaccount": {
+      "name": "default",
+      "uid": "bf4f848f-3987-4d03-a8c7-92d019ee60bc"
+    }
+  },
+  "nbf": 1718035821,
+  "sub": "system:serviceaccount:app-b:default"
+}
+```
+
+We can see that the token is valid for 1 hour, and the `sub` is the `system:serviceaccount:app-b:default
+
+Feel free to read more about the `ServiceAccount` [here](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/).
+
+### How the controller is going to validate the token?
+
+The controller is going to use the `kube-apiserver` to validate the token.
+
+Kubenertes has a feature called `TokenReview` that is a way to validate the token.
+
+The controller is going to send the token to the `kube-apiserver` and 
+the `kube-apiserver` is going to validate the token and return the information about the token.
+
+```go
+
+
+```
+
+
+
+Read more about `TokenReview` [here](https://kubernetes.io/docs/reference/access-authn-authz/authentication/#webhook-token-authentication).
+
+
+
+
 
 

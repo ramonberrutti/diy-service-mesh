@@ -4,6 +4,9 @@ package sm.v1;
 service ServiceMeshService {
   rpc GetServices(GetServicesRequest) returns (GetServicesResponse) {}
   rpc GetUpstreams(UpstreamRequest) returns (stream UpstreamResponse) {}
+  
+  // SignCertificate signs a certificate signing request (CSR) and returns the signed certificate.
+  rpc SignCertificate(SignCertificateRequest) returns (SignCertificateResponse) {}
 }
 
 message GetServicesRequest {
@@ -53,4 +56,15 @@ message Service {
 
   // deleted
   bool deleted = 7;
+}
+
+message SignCertificateRequest {
+  string name = 1;
+  string token = 2;
+  bytes csr = 3;
+}
+
+message SignCertificateResponse {
+  bytes cert = 1;
+  bytes ca = 2;
 }

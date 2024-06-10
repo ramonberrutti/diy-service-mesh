@@ -109,6 +109,36 @@ func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 			RunAsUser:    func(i int64) *int64 { return &i }(1337),
 			RunAsNonRoot: func(b bool) *bool { return &b }(true),
 		},
+		Env: []v1.EnvVar{
+			{
+				Name:  "SERVICE_MESH_TOKEN_FILE",
+				Value: "/var/run/secrets/diy-service-mesh/token",
+			},
+		},
+		VolumeMounts: []v1.VolumeMount{
+			{
+				Name:      "proxy-token",
+				MountPath: "/var/run/secrets/diy-service-mesh",
+				ReadOnly:  true,
+			},
+		},
+	})
+
+	pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
+		Name: "proxy-token",
+		VolumeSource: v1.VolumeSource{
+			Projected: &v1.ProjectedVolumeSource{
+				Sources: []v1.VolumeProjection{
+					{
+						ServiceAccountToken: &v1.ServiceAccountTokenProjection{
+							Audience:          "diy-service-mesh",
+							ExpirationSeconds: func(i int64) *int64 { return &i }(3600),
+							Path:              "token",
+						},
+					},
+				},
+			},
+		},
 	})
 
 	patch := []map[string]any{
@@ -121,6 +151,11 @@ func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 			"op":    "replace",
 			"path":  "/spec/containers",
 			"value": pod.Spec.Containers,
+		},
+		{
+			"op":    "replace",
+			"path":  "/spec/volumes",
+			"value": pod.Spec.Volumes,
 		},
 	}
 
