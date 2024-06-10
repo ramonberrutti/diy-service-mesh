@@ -384,6 +384,22 @@ func getCertificates(ctx context.Context, smv1Client smv1pb.ServiceMeshServiceCl
 			},
 		},
 
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			opts := x509.VerifyOptions{
+				Roots:         caCertPool,
+				CurrentTime:   time.Now(),
+				Intermediates: x509.NewCertPool(),
+				KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			}
+
+			for _, cert := range cs.PeerCertificates[1:] {
+				opts.Intermediates.AddCert(cert)
+			}
+
+			_, err := cs.PeerCertificates[0].Verify(opts)
+			return err
+		},
+
 		RootCAs:            caCertPool,
 		ClientCAs:          caCertPool,
 		InsecureSkipVerify: true,
