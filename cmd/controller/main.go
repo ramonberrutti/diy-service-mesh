@@ -53,36 +53,39 @@ func main() {
 		panic(err)
 	}
 
+	// Create the shared informer factory with one hour of resync.
 	factory := informers.NewSharedInformerFactory(clientset, time.Hour)
 
-	serviceInformer := factory.Core().V1().Services()
-	endpointInformer := factory.Discovery().V1().EndpointSlices()
+	// For now we are going to watch only the services and EndpointSlices
+	serviceInformer := factory.Core().V1().Services().Informer()
+	endpointInformer := factory.Discovery().V1().EndpointSlices().Informer()
 
+	// Creates our watcher where we are going to process the events and save the services and endpointsslices
 	w := &watcher{
 		services: make(map[string]*smv1pb.Service),
 	}
 
-	serviceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	// The informer is going to call the methods of the watcher when a event occurs.
+	serviceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    w.addService,
 		UpdateFunc: w.updateService,
 		DeleteFunc: w.deleteService,
 	})
-
-	endpointInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	endpointInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    w.addEndpointSlice,
 		UpdateFunc: w.updateEndpointSlice,
 		DeleteFunc: w.deleteEndpointSlice,
 	})
 
+	// Start the informers
 	stopCh := ctx.Done()
-
 	factory.Start(stopCh)
 
-	if !cache.WaitForCacheSync(stopCh, serviceInformer.Informer().HasSynced) {
-		panic("failed to sync")
-	}
-
-	if !cache.WaitForCacheSync(stopCh, endpointInformer.Informer().HasSynced) {
+	// Wait for the informers to sync
+	if !cache.WaitForCacheSync(stopCh,
+		serviceInformer.HasSynced,
+		endpointInformer.HasSynced,
+	) {
 		panic("failed to sync")
 	}
 
@@ -190,7 +193,6 @@ func (s *serviceMeshServer) SignCertificate(ctx context.Context, req *smv1pb.Sig
 
 type watcher struct {
 	sync.Mutex
-
 	services map[string]*smv1pb.Service
 }
 

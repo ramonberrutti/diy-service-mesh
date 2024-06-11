@@ -219,7 +219,7 @@ type Service struct {
 	ClusterIps []string            `protobuf:"bytes,4,rep,name=cluster_ips,json=clusterIps,proto3" json:"cluster_ips,omitempty"`
 	Endpoints  []*Service_Endpoint `protobuf:"bytes,5,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
 	Canaries   []*Service_Canary   `protobuf:"bytes,6,rep,name=canaries,proto3" json:"canaries,omitempty"`
-	// deleted
+	// deleted is true if the service has been deleted from the mesh.
 	Deleted bool `protobuf:"varint,7,opt,name=deleted,proto3" json:"deleted,omitempty"`
 }
 

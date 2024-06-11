@@ -3,7 +3,7 @@ package sm.v1;
 
 service ServiceMeshService {
   rpc GetServices(GetServicesRequest) returns (GetServicesResponse) {}
-  rpc GetUpstreams(UpstreamRequest) returns (stream UpstreamResponse) {}
+  rpc WatchServices(WatchServicesRequest) returns (stream WatchServicesResponse) {}
   
   // SignCertificate signs a certificate signing request (CSR) and returns the signed certificate.
   rpc SignCertificate(SignCertificateRequest) returns (SignCertificateResponse) {}
@@ -54,7 +54,7 @@ message Service {
   repeated Endpoint endpoints = 5;
   repeated Canary canaries = 6;
 
-  // deleted
+  // deleted is true if the service has been deleted from the mesh.
   bool deleted = 7;
 }
 

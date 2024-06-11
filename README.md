@@ -697,8 +697,275 @@ We are going to use gRPC to communicate between the controller and the proxy.
 As mention before, the controller is going to watch the services and endpointsslices and push the configuration to the proxy.
 
 ```go
+func main() {
+    // ...
+	// Creates the in-cluster config
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		panic(err.Error())
+	}
+	// creates the client
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		panic(err.Error())
+	}
 
+    // Create the shared informer factory with one hour of resync.
+	factory := informers.NewSharedInformerFactory(clientset, time.Hour)
+
+    // For now we are going to watch only the services and EndpointSlices
+	serviceInformer := factory.Core().V1().Services().Informer()
+	endpointInformer := factory.Discovery().V1().EndpointSlices().Informer()
+
+    // Creates our watcher where we are going to process the events and save the services and endpointsslices
+	w := &watcher{
+		services: make(map[string]*smv1pb.Service),
+	}
+
+    // The informer is going to call the methods of the watcher when a event occurs.
+	serviceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    w.addService,
+		UpdateFunc: w.updateService,
+		DeleteFunc: w.deleteService,
+	})
+	endpointInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    w.addEndpointSlice,
+		UpdateFunc: w.updateEndpointSlice,
+		DeleteFunc: w.deleteEndpointSlice,
+	})
+
+    // Start the informers
+    stopCh := ctx.Done()
+	factory.Start(stopCh)
+
+    // Wait for the informers to sync
+	if !cache.WaitForCacheSync(stopCh,
+		serviceInformer.HasSynced,
+		endpointInformer.HasSynced,
+	) {
+		panic("failed to sync")
+	}
+
+	l, err := net.Listen("tcp", ":8080")
+	if err != nil {
+		panic(err)
+	}
+	defer l.Close()
+	srv := grpc.NewServer()
+
+	smv1pb.RegisterServiceMeshServiceServer(srv, &serviceMeshServer{
+		watcher: w,
+	})
+
+	go func() {
+		if err := srv.Serve(l); err != nil {
+			panic(err)
+		}
+	}()
+
+	<-ctx.Done()
+	srv.GracefulStop()
+}
 ```
+
+The `watcher` is going to process the events and save the services and endpointsslices.
+We are going to improve and add our custom logic to the `watcher` in the next steps.
+
+```go
+type watcher struct {
+	sync.Mutex
+	services map[string]*smv1pb.Service
+}
+
+func (w *watcher) getServices(services []string) []*smv1pb.Service {
+	w.Lock()
+	defer w.Unlock()
+
+	res := make([]*smv1pb.Service, len(services))
+	for i, key := range services {
+		res[i] = w.services[key]
+	}
+
+	return res
+}
+
+func (w *watcher) addService(obj any) {
+	service := obj.(*corev1.Service)
+
+	key := service.Namespace + "/" + service.Name
+
+	w.Lock()
+	defer w.Unlock()
+	svc, ok := w.services[key]
+	if !ok {
+		svc = &smv1pb.Service{
+			Name:      service.Name,
+			Namespace: service.Namespace,
+		}
+	}
+
+	svc.Ports = make([]*smv1pb.Service_Port, len(service.Spec.Ports))
+	for i, port := range service.Spec.Ports {
+		svc.Ports[i] = &smv1pb.Service_Port{
+			Name:       port.Name,
+			Protocol:   string(port.Protocol),
+			Port:       int32(port.Port),
+			TargetPort: port.TargetPort.IntVal, // We are ignoring the string target port for now
+		}
+	}
+	svc.ClusterIps = service.Spec.ClusterIPs
+
+	w.services[key] = svc
+}
+
+func (w *watcher) updateService(oldObj, newObj any) {
+	w.addService(newObj)
+}
+
+func (w *watcher) deleteService(obj any) {
+	service, ok := obj.(*corev1.Service)
+	if !ok {
+		// The object is of an unexpected type
+		return
+	}
+
+	key := service.Namespace + "/" + service.Name
+	w.Lock()
+	defer w.Unlock()
+	delete(w.services, key)
+}
+
+func (w *watcher) addEndpointSlice(obj any) {
+	endpoints := obj.(*discoveryv1.EndpointSlice)
+
+	serviceName, ok := endpoints.Labels[discoveryv1.LabelServiceName]
+	if !ok {
+		return
+	}
+
+	key := endpoints.Namespace + "/" + serviceName
+
+	w.Lock()
+	defer w.Unlock()
+	svc, ok := w.services[key]
+	if !ok {
+		svc = &smv1pb.Service{
+			Name:      serviceName,
+			Namespace: endpoints.Namespace,
+		}
+	}
+
+	svc.Endpoints = make([]*smv1pb.Service_Endpoint, len(endpoints.Endpoints))
+	for i, endpoint := range endpoints.Endpoints {
+		// Check if the endpoint is ready
+		ready := true
+		if endpoint.Conditions.Ready != nil {
+			ready = *endpoint.Conditions.Ready
+		}
+		podName := ""
+		if endpoint.TargetRef != nil {
+			podName = endpoint.TargetRef.Name
+		}
+
+		svc.Endpoints[i] = &smv1pb.Service_Endpoint{
+			Addresses: endpoint.Addresses,
+			Ready:     ready,
+			PodName:   podName,
+			// We are ignoring serving and terminating for now
+		}
+	}
+
+	w.services[key] = svc
+}
+
+func (w *watcher) updateEndpointSlice(oldObj, newObj any) {
+	w.addEndpointSlice(newObj)
+}
+
+func (w *watcher) deleteEndpointSlice(obj any) {
+	endpoints, ok := obj.(*discoveryv1.EndpointSlice)
+	if !ok {
+		// The object is of an unexpected type
+		return
+	}
+
+	serviceName, ok := endpoints.Labels[discoveryv1.LabelServiceName]
+	if !ok {
+		return
+	}
+
+	key := endpoints.Namespace + "/" + serviceName
+	w.Lock()
+	defer w.Unlock()
+	delete(w.services, key)
+}
+```
+
+We are saving the services and endpointsslices in our service structure generated by the protobuf.
+
+```protobuf
+message Service {
+  message Port {
+    string name = 1;
+    int32 port = 2;
+    int32 target_port = 3;
+    string protocol = 4;
+  }
+
+  message Endpoint {
+    repeated string addresses = 1;
+    bool ready = 2;
+    // We are ignoring serving and terminating for now
+    string pod_name = 3;
+  }
+
+  message Canary {
+    string name = 1;
+    string namespace = 2; // Empty string means the same namespace as the service
+    int32 port = 3; // Empty string means the same port as the service
+    int32 weight = 4; // 0-100
+  }
+
+  string name = 1;
+  string namespace = 2;
+  repeated Port ports = 3;
+  repeated string cluster_ips = 4;
+  repeated Endpoint endpoints = 5;
+  repeated Canary canaries = 6;
+
+  // deleted is true if the service has been deleted from the mesh.
+  bool deleted = 7;
+}
+```
+
+Finally, the gRPC method to request services information:
+
+```protobuf
+service ServiceMeshService {
+  rpc GetServices(GetServicesRequest) returns (GetServicesResponse) {}
+  rpc WatchServices(WatchServicesRequest) returns (stream WatchServicesResponse) {}
+}
+```
+
+We are ignoring the `WatchServices` for now, but we are going to implement it in the next steps.
+
+```go
+type serviceMeshServer struct {
+	smv1pb.UnimplementedServiceMeshServiceServer
+	watcher *watcher
+}
+
+func (s *serviceMeshServer) GetServices(ctx context.Context, req *smv1pb.GetServicesRequest) (*smv1pb.GetServicesResponse, error) {
+	services := s.watcher.getServices(req.Services)
+	return &smv1pb.GetServicesResponse{
+		Services: services,
+	}, nil
+}
+```
+
+## TODO
+
+Add some examples before we add identity to the service mesh.
 
 
 ## Identity
