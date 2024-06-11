@@ -51,18 +51,15 @@ func main() {
 	smv1Client := smv1pb.NewServiceMeshServiceClient(grpcConn)
 	_ = smv1Client
 
-	tlsConfig, err := getCertificates(ctx, smv1Client)
+	serverTLSConfig, clientTLSConfig, err := getMTLSConfig(ctx, smv1Client)
 	if err != nil {
 		panic(err)
 	}
-
-	_ = tlsConfig
 
 	g, ctx := errgroup.WithContext(ctx)
 	// Inbound connection
 	g.Go(func() error {
 		l, err := net.Listen("tcp", ":4000")
-		// l, err := tls.Listen("tcp", ":4000", tlsConfig)
 		if err != nil {
 			return fmt.Errorf("failed to listen: %w", err)
 		}
@@ -151,7 +148,7 @@ func main() {
 					responder(cp, destPort, "<unknown>")
 				} else { // TLS
 					fmt.Println("TLS connection")
-					tlsConn := tls.Server(cp, tlsConfig)
+					tlsConn := tls.Server(cp, serverTLSConfig)
 					if err := tlsConn.Handshake(); err != nil {
 						return
 					}
@@ -240,7 +237,7 @@ func main() {
 				// Look up the original destination
 				return net.Dial(network, fmt.Sprintf("%s:%d", randomAddr, finalPort))
 			},
-			TLSClientConfig: tlsConfig,
+			TLSClientConfig: clientTLSConfig,
 		},
 	}
 
@@ -331,24 +328,25 @@ func originalPort(c net.Conn) (uint16, error) {
 	return uint16(addr.Multiaddr[2])<<8 + uint16(addr.Multiaddr[3]), nil
 }
 
-// Generate certificates and request signing:
-func getCertificates(ctx context.Context, smv1Client smv1pb.ServiceMeshServiceClient) (*tls.Config, error) {
+// Generate a new certificate, request a signature from the controller
+// and return the TLS configuration
+func getMTLSConfig(ctx context.Context, smv1Client smv1pb.ServiceMeshServiceClient) (*tls.Config, *tls.Config, error) {
 	token, err := os.ReadFile(os.Getenv("SERVICE_MESH_TOKEN_FILE"))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	tokenStr := string(token)
 
 	sa, err := getServiceAccountFromToken(tokenStr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Generate a new key pair
 	public, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	_ = public
 
@@ -359,7 +357,7 @@ func getCertificates(ctx context.Context, smv1Client smv1pb.ServiceMeshServiceCl
 		},
 	}, priv)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	resp, err := smv1Client.SignCertificate(ctx, &smv1pb.SignCertificateRequest{
@@ -368,7 +366,7 @@ func getCertificates(ctx context.Context, smv1Client smv1pb.ServiceMeshServiceCl
 		Csr:   pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csr}),
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	cert, _ := pem.Decode(resp.Cert)
@@ -376,37 +374,64 @@ func getCertificates(ctx context.Context, smv1Client smv1pb.ServiceMeshServiceCl
 	caCertPool := x509.NewCertPool()
 	caCertPool.AppendCertsFromPEM(resp.Ca)
 
-	tlsConfig := &tls.Config{
+	verifyPeerCertificate := func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		certs := make([]*x509.Certificate, 0, len(rawCerts))
+		for _, rawCert := range rawCerts {
+			cert, err := x509.ParseCertificate(rawCert)
+			if err != nil {
+				return fmt.Errorf("failed to parse certificate: %w", err)
+			}
+			certs = append(certs, cert)
+		}
+
+		if len(certs) == 0 {
+			return fmt.Errorf("no certificates provided")
+		}
+
+		intermediates := x509.NewCertPool()
+		for _, cert := range certs[1:] {
+			intermediates.AddCert(cert)
+		}
+
+		opts := x509.VerifyOptions{
+			Roots:         caCertPool,
+			Intermediates: intermediates,
+			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+			CurrentTime:   time.Now(),
+		}
+
+		if _, err := certs[0].Verify(opts); err != nil {
+			return fmt.Errorf("failed to verify certificate: %w", err)
+		}
+
+		return nil
+	}
+
+	serverTLSConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
 		Certificates: []tls.Certificate{
 			{
 				Certificate: [][]byte{cert.Bytes},
 				PrivateKey:  priv,
 			},
 		},
-
-		VerifyConnection: func(cs tls.ConnectionState) error {
-			opts := x509.VerifyOptions{
-				Roots:         caCertPool,
-				CurrentTime:   time.Now(),
-				Intermediates: x509.NewCertPool(),
-				KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-			}
-
-			for _, cert := range cs.PeerCertificates[1:] {
-				opts.Intermediates.AddCert(cert)
-			}
-
-			_, err := cs.PeerCertificates[0].Verify(opts)
-			return err
-		},
-
-		RootCAs:            caCertPool,
-		ClientCAs:          caCertPool,
-		InsecureSkipVerify: true,
-		ClientAuth:         tls.RequireAndVerifyClientCert,
+		VerifyPeerCertificate: verifyPeerCertificate,
+		ClientAuth:            tls.RequireAnyClientCert,
 	}
 
-	return tlsConfig, nil
+	clientTLSConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		Certificates: []tls.Certificate{
+			{
+				Certificate: [][]byte{cert.Bytes},
+				PrivateKey:  priv,
+			},
+		},
+		VerifyPeerCertificate: verifyPeerCertificate,
+		InsecureSkipVerify:    true,
+	}
+
+	return serverTLSConfig, clientTLSConfig, nil
 }
 
 func getServiceAccountFromToken(token string) (string, error) {
