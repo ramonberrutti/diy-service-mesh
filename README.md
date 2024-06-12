@@ -1,3 +1,5 @@
+DESCLAIMER: This is a work in progress, the code is not complete and is not working yet.
+
 # DIY Service Mesh
 
 This is a Do-It-Yourself Service Mesh, which is a simple tutorial for understanding 
@@ -1056,4 +1058,15 @@ Read more about `TokenReview` [here](https://kubernetes.io/docs/reference/access
 
 
 
+## References
 
+A list of references that I used to create this project:
+
+- https://github.com/istio/istio
+- https://github.com/istio/api
+- https://github.com/linkerd/linkerd2
+- https://github.com/linkerd/linkerd2-proxy
+- https://github.com/linkerd/linkerd2-proxy-api
+- https://www.agwa.name/blog/post/writing_an_sni_proxy_in_go
+- https://github.com/spiffe/go-spiffe
+- 

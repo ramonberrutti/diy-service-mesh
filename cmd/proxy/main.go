@@ -69,57 +69,40 @@ func main() {
 			l.Close()
 		}()
 
-		responder := func(c io.ReadWriteCloser, destPort uint16, caller string) {
+		responder := func(c io.ReadWriteCloser, destPort uint16, caller string) error {
 			defer c.Close()
 
-			// Read the request
+			// Read request
 			req, err := http.ReadRequest(bufio.NewReader(c))
 			if err != nil {
-				return
+				return err
 			}
 
-			reqDump, err := httputil.DumpRequest(req, true)
+			req.Header.Set("X-Called-By", caller)
+
+			upstream, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", destPort))
 			if err != nil {
-				return
+				return err
 			}
-			fmt.Println("Request Inbound Dump:")
-			fmt.Println(string(reqDump))
+			defer upstream.Close()
 
-			req.RequestURI = ""
-			req.URL.Scheme = "http"
-			req.URL.Host = req.Host
-			req.Header.Add("X-Caller", caller)
-
-			inboundClient := http.Client{
-				Transport: &http.Transport{
-					DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-						return net.Dial(network, fmt.Sprintf("127.0.0.1:%d", destPort))
-					},
-				},
+			// Write request
+			if err := req.Write(upstream); err != nil {
+				return err
 			}
 
-			// Perform the request
-			resp, err := inboundClient.Do(req)
+			// Read response
+			resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
 			if err != nil {
-				body := fmt.Sprintf("Failed to process request (inbound: %s): %v", os.Getenv("HOSTNAME"), err)
-				rp := http.Response{
-					Status:        http.StatusText(http.StatusInternalServerError),
-					StatusCode:    http.StatusInternalServerError,
-					Proto:         "HTTP/1.1",
-					ProtoMajor:    1,
-					ProtoMinor:    1,
-					Body:          io.NopCloser(bytes.NewBufferString(body)),
-					ContentLength: int64(len(body)),
-					Header:        make(http.Header),
-				}
-
-				rp.Write(c)
-				return
+				return err
 			}
-			defer resp.Body.Close()
 
-			fmt.Printf("Request: %s Respond: %d\n", req.URL.Path, resp.StatusCode)
-			resp.Write(c)
+			// Write response
+			if err := resp.Write(c); err != nil {
+				return err
+			}
+
+			return nil
 		}
 
 		for {
@@ -145,7 +128,9 @@ func main() {
 				fmt.Printf("ClientHello: %+v\n", clientHello)
 				if err != nil { // Plaintext
 					fmt.Println("Plaintext connection")
-					responder(cp, destPort, "<unknown>")
+					if err := responder(cp, destPort, "<unknown>"); err != nil {
+						fmt.Printf("Failed to respond: %v\n", err)
+					}
 				} else { // TLS
 					fmt.Println("TLS connection")
 					tlsConn := tls.Server(cp, serverTLSConfig)
@@ -161,7 +146,9 @@ func main() {
 						break
 					}
 
-					responder(tlsConn, destPort, caller)
+					if err := responder(tlsConn, destPort, caller); err != nil {
+						fmt.Printf("Failed to respond: %v\n", err)
+					}
 				}
 			}(conn)
 		}
@@ -300,6 +287,14 @@ func main() {
 					return
 				}
 				defer resp.Body.Close()
+
+				if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
+					leaf := resp.TLS.PeerCertificates[0]
+					resp.Header.Set("X-Served-By", leaf.Subject.CommonName)
+					if len(leaf.Subject.Locality) > 0 {
+						resp.Header.Set("X-Served-By-Location", leaf.Subject.Locality[0])
+					}
+				}
 
 				fmt.Printf("Request: %s Respond: %d\n", req.URL.Path, resp.StatusCode)
 				resp.Write(c)

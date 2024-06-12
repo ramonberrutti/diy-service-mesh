@@ -17,11 +17,11 @@ message GetServicesResponse {
   repeated Service services = 1;
 }
 
-message UpstreamRequest {
-  string serviceName = 1;
+message WatchServicesRequest {
+  repeated string services = 1;
 }
 
-message UpstreamResponse {
+message WatchServicesResponse {
   repeated Service services = 1;
 }
 

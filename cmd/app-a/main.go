@@ -14,6 +14,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	n := 0
+
+	httpClient := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
 	// This application will call the `app-b` every second
 	ticker := time.NewTicker(time.Second)
 	for {
@@ -26,7 +31,7 @@ func main() {
 				panic(err)
 			}
 
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := httpClient.Do(req)
 			if err != nil {
 				panic(err)
 			}

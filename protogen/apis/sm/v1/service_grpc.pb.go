@@ -20,7 +20,7 @@ const _ = grpc.SupportPackageIsVersion7
 
 const (
 	ServiceMeshService_GetServices_FullMethodName     = "/sm.v1.ServiceMeshService/GetServices"
-	ServiceMeshService_GetUpstreams_FullMethodName    = "/sm.v1.ServiceMeshService/GetUpstreams"
+	ServiceMeshService_WatchServices_FullMethodName   = "/sm.v1.ServiceMeshService/WatchServices"
 	ServiceMeshService_SignCertificate_FullMethodName = "/sm.v1.ServiceMeshService/SignCertificate"
 )
 
@@ -29,7 +29,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ServiceMeshServiceClient interface {
 	GetServices(ctx context.Context, in *GetServicesRequest, opts ...grpc.CallOption) (*GetServicesResponse, error)
-	GetUpstreams(ctx context.Context, in *UpstreamRequest, opts ...grpc.CallOption) (ServiceMeshService_GetUpstreamsClient, error)
+	WatchServices(ctx context.Context, in *WatchServicesRequest, opts ...grpc.CallOption) (ServiceMeshService_WatchServicesClient, error)
 	// SignCertificate signs a certificate signing request (CSR) and returns the signed certificate.
 	SignCertificate(ctx context.Context, in *SignCertificateRequest, opts ...grpc.CallOption) (*SignCertificateResponse, error)
 }
@@ -51,12 +51,12 @@ func (c *serviceMeshServiceClient) GetServices(ctx context.Context, in *GetServi
 	return out, nil
 }
 
-func (c *serviceMeshServiceClient) GetUpstreams(ctx context.Context, in *UpstreamRequest, opts ...grpc.CallOption) (ServiceMeshService_GetUpstreamsClient, error) {
-	stream, err := c.cc.NewStream(ctx, &ServiceMeshService_ServiceDesc.Streams[0], ServiceMeshService_GetUpstreams_FullMethodName, opts...)
+func (c *serviceMeshServiceClient) WatchServices(ctx context.Context, in *WatchServicesRequest, opts ...grpc.CallOption) (ServiceMeshService_WatchServicesClient, error) {
+	stream, err := c.cc.NewStream(ctx, &ServiceMeshService_ServiceDesc.Streams[0], ServiceMeshService_WatchServices_FullMethodName, opts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &serviceMeshServiceGetUpstreamsClient{stream}
+	x := &serviceMeshServiceWatchServicesClient{stream}
 	if err := x.ClientStream.SendMsg(in); err != nil {
 		return nil, err
 	}
@@ -66,17 +66,17 @@ func (c *serviceMeshServiceClient) GetUpstreams(ctx context.Context, in *Upstrea
 	return x, nil
 }
 
-type ServiceMeshService_GetUpstreamsClient interface {
-	Recv() (*UpstreamResponse, error)
+type ServiceMeshService_WatchServicesClient interface {
+	Recv() (*WatchServicesResponse, error)
 	grpc.ClientStream
 }
 
-type serviceMeshServiceGetUpstreamsClient struct {
+type serviceMeshServiceWatchServicesClient struct {
 	grpc.ClientStream
 }
 
-func (x *serviceMeshServiceGetUpstreamsClient) Recv() (*UpstreamResponse, error) {
-	m := new(UpstreamResponse)
+func (x *serviceMeshServiceWatchServicesClient) Recv() (*WatchServicesResponse, error) {
+	m := new(WatchServicesResponse)
 	if err := x.ClientStream.RecvMsg(m); err != nil {
 		return nil, err
 	}
@@ -97,7 +97,7 @@ func (c *serviceMeshServiceClient) SignCertificate(ctx context.Context, in *Sign
 // for forward compatibility
 type ServiceMeshServiceServer interface {
 	GetServices(context.Context, *GetServicesRequest) (*GetServicesResponse, error)
-	GetUpstreams(*UpstreamRequest, ServiceMeshService_GetUpstreamsServer) error
+	WatchServices(*WatchServicesRequest, ServiceMeshService_WatchServicesServer) error
 	// SignCertificate signs a certificate signing request (CSR) and returns the signed certificate.
 	SignCertificate(context.Context, *SignCertificateRequest) (*SignCertificateResponse, error)
 }
@@ -109,8 +109,8 @@ type UnimplementedServiceMeshServiceServer struct {
 func (UnimplementedServiceMeshServiceServer) GetServices(context.Context, *GetServicesRequest) (*GetServicesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetServices not implemented")
 }
-func (UnimplementedServiceMeshServiceServer) GetUpstreams(*UpstreamRequest, ServiceMeshService_GetUpstreamsServer) error {
-	return status.Errorf(codes.Unimplemented, "method GetUpstreams not implemented")
+func (UnimplementedServiceMeshServiceServer) WatchServices(*WatchServicesRequest, ServiceMeshService_WatchServicesServer) error {
+	return status.Errorf(codes.Unimplemented, "method WatchServices not implemented")
 }
 func (UnimplementedServiceMeshServiceServer) SignCertificate(context.Context, *SignCertificateRequest) (*SignCertificateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SignCertificate not implemented")
@@ -145,24 +145,24 @@ func _ServiceMeshService_GetServices_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
-func _ServiceMeshService_GetUpstreams_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(UpstreamRequest)
+func _ServiceMeshService_WatchServices_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchServicesRequest)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(ServiceMeshServiceServer).GetUpstreams(m, &serviceMeshServiceGetUpstreamsServer{stream})
+	return srv.(ServiceMeshServiceServer).WatchServices(m, &serviceMeshServiceWatchServicesServer{stream})
 }
 
-type ServiceMeshService_GetUpstreamsServer interface {
-	Send(*UpstreamResponse) error
+type ServiceMeshService_WatchServicesServer interface {
+	Send(*WatchServicesResponse) error
 	grpc.ServerStream
 }
 
-type serviceMeshServiceGetUpstreamsServer struct {
+type serviceMeshServiceWatchServicesServer struct {
 	grpc.ServerStream
 }
 
-func (x *serviceMeshServiceGetUpstreamsServer) Send(m *UpstreamResponse) error {
+func (x *serviceMeshServiceWatchServicesServer) Send(m *WatchServicesResponse) error {
 	return x.ServerStream.SendMsg(m)
 }
 
@@ -202,8 +202,8 @@ var ServiceMeshService_ServiceDesc = grpc.ServiceDesc{
 	},
 	Streams: []grpc.StreamDesc{
 		{
-			StreamName:    "GetUpstreams",
-			Handler:       _ServiceMeshService_GetUpstreams_Handler,
+			StreamName:    "WatchServices",
+			Handler:       _ServiceMeshService_WatchServices_Handler,
 			ServerStreams: true,
 		},
 	},

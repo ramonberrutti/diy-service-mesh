@@ -13,7 +13,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: controller
+  name: service-mesh:controller
   namespace: service-mesh
 rules:
 - apiGroups: [""]
@@ -32,7 +32,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: controller
+  name: service-mesh:controller
 subjects:
 - kind: ServiceAccount
   name: controller
@@ -41,7 +41,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: controller
+  name: service-mesh:controller
 rules:
 - apiGroups: [""]
   resources: ["services"]
@@ -49,18 +49,28 @@ rules:
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
   verbs: ["list", "watch"]
-- apiGroups: ["authentication.k8s.io"]
-  resources: ["tokenreviews"]
-  verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: controller
+  name: service-mesh:controller
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
+  name: service-mesh:controller
+subjects:
+- kind: ServiceAccount
   name: controller
+  namespace: service-mesh
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: controller:system:auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
 subjects:
 - kind: ServiceAccount
   name: controller
