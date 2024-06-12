@@ -1004,30 +1004,34 @@ We can mount the token in the proxy container and use it to authenticate with th
       readOnly: true
 ```
 
-If we inspect the token, we can see that it is a JWT token.
+If we inspect the token, we can see the information about the pod and the service account:
 
 ```bash
-kubectl exec -it -n app-b pod/app-b-799c77dc9b-6x2s6 -c proxy -- sh -c 'cat /var/run/secrets/diy-service-mesh/token | cut -d "." -f 2 | base64 -d'
+kubectl -n app-b exec -it $(kubectl -n app-b get pod -l app=app-b -o jsonpath="{.items[0].metadata.name}") -c proxy -- cat /var/run/secrets/diy-service-mesh/token | jq -R 'split(".") | .[:2][] | @base64d | fromjson'
 ```json
+{
+  "alg": "RS256",
+  "kid": "QZ6JaCiBDRud6l6ftcAqQ-3TTzWNXCrPhzuIZSFTstk"
+}
 {
   "aud": [
     "diy-service-mesh"
   ],
-  "exp": 1718039421,
-  "iat": 1718035821,
+  "exp": 1718222092,
+  "iat": 1718218492,
   "iss": "https://kubernetes.default.svc.cluster.local",
   "kubernetes.io": {
     "namespace": "app-b",
     "pod": {
-      "name": "app-b-799c77dc9b-6x2s6",
-      "uid": "6e50d207-84b0-4778-b203-fef3abfda9fd"
+      "name": "app-b-799c77dc9b-mddng",
+      "uid": "a4b45dae-dc32-4681-8d76-8b5a268c5e8b"
     },
     "serviceaccount": {
       "name": "default",
-      "uid": "bf4f848f-3987-4d03-a8c7-92d019ee60bc"
+      "uid": "fa4abf5f-847e-41b8-8801-02261e1f95fb"
     }
   },
-  "nbf": 1718035821,
+  "nbf": 1718218492,
   "sub": "system:serviceaccount:app-b:default"
 }
 ```
@@ -1046,17 +1050,261 @@ The controller is going to send the token to the `kube-apiserver` and
 the `kube-apiserver` is going to validate the token and return the information about the token.
 
 ```go
+    tr := clientset.AuthenticationV1().TokenReviews()
+	resp, err := tr.Create(ctx, &authenticationv1.TokenReview{
+		Spec: authenticationv1.TokenReviewSpec{
+			Token:     token,
+			Audiences: []string{"diy-service-mesh"}, // The audience must be the same as the token
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return nil, err
+	}
 
+	if !resp.Status.Authenticated {
+		return nil, fmt.Errorf("token not authenticated")
+	}
 
+    // resp.Status.User contains useful information about the service account
 ```
 
+For our controller be able to validate the token, we need to create a `ClusterRoleBinding` between the controller service account and the `system:auth-delegator` cluster role.
 
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: controller:system:auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: controller
+  namespace: service-mesh
+```
 
 Read more about `TokenReview` [here](https://kubernetes.io/docs/reference/access-authn-authz/authentication/#webhook-token-authentication).
 
+## mTLS
 
+I would recommend reading the [SPIFFE](https://spiffe.io/) documentation to understand how mTLS works.
+There is an official implementation in Go called [go-spiffe](https://github.com/spiffe/go-spiffe).
 
+But for this project we are going to create our own CA and certificates so we can understand how it works.
 
+### So how TLS and mTLS works?
+
+I recommend the Cloudflare blog post https://www.cloudflare.com/learning/access-management/what-is-mutual-tls/ to understand how mTLS works.
+
+- **TLS**: The server presents a certificate to the client, and the client validates 
+    the certificate to ensure that the server is who it says it is.
+- **mTLS**: Both the server and the client present a certificate to each other, 
+    and both validate the certificate to ensure that the other party is who it says it is.
+
+### Creating the CA
+
+The CA is very important because is going to sign the certificates issued by the services.
+
+We are using ed25519 for the CA, but you can use any algorithm that you want, the code will be slightly different.
+
+```go
+func createCertificateAuthority(ctx context.Context, s clientCorev1.SecretInterface) (*x509.Certificate, *ed25519.PrivateKey, error) {
+	// Check if the CA already exists
+	if caCert, caKey, err := getCAFromSecret(ctx, s); err == nil {
+		return caCert, caKey, nil
+	}
+
+	// Generate the CA key pair
+	public, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Generate a random serial number
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Create the certificate template
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"diy-service-mesh"},
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().AddDate(1, 0, 0),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	// Generate the x509 certificate for the CA
+	certBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, public, priv)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Marshal the private key to PKCS8
+	privKeyBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Store the CA key and certificate in a secret so we can reuse when the pod restarts.
+	if _, err := s.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "diy-service-mesh-ca",
+			Namespace: os.Getenv("POD_NAMESPACE"),
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			corev1.TLSCertKey: pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: certBytes,
+			}),
+			corev1.TLSPrivateKeyKey: pem.EncodeToMemory(&pem.Block{
+				Type:  "PRIVATE KEY",
+				Bytes: privKeyBytes,
+			}),
+		},
+	}, metav1.CreateOptions{}); err != nil {
+		return nil, nil, err
+	}
+
+	// Parse the certificate to return the x509.Certificate
+	cert, err := x509.ParseCertificate(certBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return cert, &priv, nil
+}
+```
+
+### Creating the Certificate Signing Request (CSR)
+
+Each proxy is going to create a CSR and send it to the controller along side with the service account token.
+
+```go
+	// Read the service account token issued for diy-service-mesh audience
+	token, err := os.ReadFile(os.Getenv("SERVICE_MESH_TOKEN_FILE"))
+	if err != nil {
+		return nil, nil, err
+	}
+	tokenStr := string(token)
+
+	// Parse the token and get the service account name.
+	sa, err := getServiceAccountFromToken(tokenStr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Generate a new key pair.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Generate a new certificate signing request with the service account name as the common name.
+	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{
+			CommonName: sa,
+			Locality:   []string{os.Getenv("HOSTNAME")}, // Use the hostname as the locality
+		},
+	}, priv)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Send the certificate signing request to the controller and get the signed certificate.
+	// The controller is responsible for verifying the service account token and the certificate signing request.
+	resp, err := smv1Client.SignCertificate(ctx, &smv1pb.SignCertificateRequest{
+		Name:  sa,
+		Token: tokenStr,
+		Csr:   pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csr}),
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// resp contains the signed certificate and the CA certificate.
+```
+
+### Signing the Certificate Signing Request (CSR) in the controller
+
+The controller is going to validate the token and the CSR subjects and sign the certificate with the CA private key.
+
+```go
+func (s *serviceMeshServer) SignCertificate(ctx context.Context, req *smv1pb.SignCertificateRequest) (*smv1pb.SignCertificateResponse, error) {
+	// Validate the token
+	resp, err := s.tr.Create(ctx, &authenticationv1.TokenReview{
+		Spec: authenticationv1.TokenReviewSpec{
+			Token:     req.Token,
+			Audiences: []string{"diy-service-mesh"},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if the token is authenticated
+	if !resp.Status.Authenticated {
+		return nil, fmt.Errorf("token not authenticated")
+	}
+
+	// Convert the CSR from PEM to DER
+	csrBlock, _ := pem.Decode(req.Csr)
+	if csrBlock == nil || csrBlock.Type != "CERTIFICATE REQUEST" {
+		return nil, fmt.Errorf("invalid csr")
+	}
+
+	// Parse the CSR
+	csr, err := x509.ParseCertificateRequest(csrBlock.Bytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate the CSR with the tokenReview information
+	if csr.Subject.CommonName != req.Name || csr.Subject.CommonName != resp.Status.User.Username {
+		return nil, fmt.Errorf("invalid csr")
+	}
+
+	// We can validate others fields from the subject like the organization, country, etc.
+
+	// Generate a random serial number
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, err
+	}
+
+	// Create the certificate template
+	cert := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject:      csr.Subject,
+		Issuer:       s.caCert.Subject,
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().AddDate(1, 0, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+	}
+
+	// Sign the certificate with the CA Key.
+	certBytes, err := x509.CreateCertificate(rand.Reader, &cert, s.caCert, csr.PublicKey, s.caKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return the signed certificate and the CA certificate
+	return &smv1pb.SignCertificateResponse{
+		Cert: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes}),
+		Ca:   pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.caCert.Raw}),
+	}, nil
+}
+```
 
 ## References
 

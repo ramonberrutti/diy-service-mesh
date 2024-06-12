@@ -131,8 +131,7 @@ func (s *serviceMeshServer) GetServices(ctx context.Context, req *smv1pb.GetServ
 }
 
 func (s *serviceMeshServer) SignCertificate(ctx context.Context, req *smv1pb.SignCertificateRequest) (*smv1pb.SignCertificateResponse, error) {
-	fmt.Printf("Received request to sign certificate for %s\n", req.Name)
-
+	// Validate the token
 	resp, err := s.tr.Create(ctx, &authenticationv1.TokenReview{
 		Spec: authenticationv1.TokenReviewSpec{
 			Token:     req.Token,
@@ -143,16 +142,18 @@ func (s *serviceMeshServer) SignCertificate(ctx context.Context, req *smv1pb.Sig
 		return nil, err
 	}
 
+	// Check if the token is authenticated
 	if !resp.Status.Authenticated {
 		return nil, fmt.Errorf("token not authenticated")
 	}
 
-	// We can use the tokenReview information to add extra information to the certificate.
+	// Convert the CSR from PEM to DER
 	csrBlock, _ := pem.Decode(req.Csr)
 	if csrBlock == nil || csrBlock.Type != "CERTIFICATE REQUEST" {
 		return nil, fmt.Errorf("invalid csr")
 	}
 
+	// Parse the CSR
 	csr, err := x509.ParseCertificateRequest(csrBlock.Bytes)
 	if err != nil {
 		return nil, err
@@ -163,32 +164,36 @@ func (s *serviceMeshServer) SignCertificate(ctx context.Context, req *smv1pb.Sig
 		return nil, fmt.Errorf("invalid csr")
 	}
 
+	// We can validate others fields from the subject like the organization, country, etc.
+
+	// Generate a random serial number
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, err
 	}
 
+	// Create the certificate template
 	cert := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject:      csr.Subject,
+		Issuer:       s.caCert.Subject,
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().AddDate(1, 0, 0),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 	}
-	_ = cert
 
-	// Sign the certificate
+	// Sign the certificate with the CA Key.
 	certBytes, err := x509.CreateCertificate(rand.Reader, &cert, s.caCert, csr.PublicKey, s.caKey)
 	if err != nil {
 		return nil, err
 	}
 
+	// Return the signed certificate and the CA certificate
 	return &smv1pb.SignCertificateResponse{
 		Cert: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes}),
 		Ca:   pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.caCert.Raw}),
 	}, nil
-
 }
 
 type watcher struct {
@@ -319,48 +324,59 @@ func (w *watcher) deleteEndpointSlice(obj any) {
 	delete(w.services, key)
 }
 
-func createCertificateAuthority(ctx context.Context, s clientCorev1.SecretInterface) (*x509.Certificate, *ed25519.PrivateKey, error) {
+func getCAFromSecret(ctx context.Context, s clientCorev1.SecretInterface) (*x509.Certificate, *ed25519.PrivateKey, error) {
 	secret, err := s.Get(ctx, "diy-service-mesh-ca", metav1.GetOptions{})
-	if err == nil {
-		certBlock, _ := pem.Decode(secret.Data[corev1.TLSCertKey])
-		if certBlock == nil || certBlock.Type != "CERTIFICATE" {
-			return nil, nil, fmt.Errorf("invalid certificate")
-		}
-
-		cert, err := x509.ParseCertificate(certBlock.Bytes)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		keyBlock, _ := pem.Decode(secret.Data[corev1.TLSPrivateKeyKey])
-		if keyBlock == nil || keyBlock.Type != "PRIVATE KEY" {
-			return nil, nil, fmt.Errorf("invalid private key")
-		}
-
-		priv, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		privKey, ok := priv.(ed25519.PrivateKey)
-		if !ok {
-			return nil, nil, fmt.Errorf("invalid private key type")
-		}
-
-		return cert, &privKey, nil
+	if err != nil {
+		return nil, nil, err
 	}
 
-	// Create a self-signed certificate authority
+	certBlock, _ := pem.Decode(secret.Data[corev1.TLSCertKey])
+	if certBlock == nil || certBlock.Type != "CERTIFICATE" {
+		return nil, nil, fmt.Errorf("invalid certificate")
+	}
+
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	keyBlock, _ := pem.Decode(secret.Data[corev1.TLSPrivateKeyKey])
+	if keyBlock == nil || keyBlock.Type != "PRIVATE KEY" {
+		return nil, nil, fmt.Errorf("invalid private key")
+	}
+
+	priv, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	privKey, ok := priv.(ed25519.PrivateKey)
+	if !ok {
+		return nil, nil, fmt.Errorf("invalid private key type")
+	}
+
+	return cert, &privKey, nil
+}
+
+func createCertificateAuthority(ctx context.Context, s clientCorev1.SecretInterface) (*x509.Certificate, *ed25519.PrivateKey, error) {
+	// Check if the CA already exists
+	if caCert, caKey, err := getCAFromSecret(ctx, s); err == nil {
+		return caCert, caKey, nil
+	}
+
+	// Generate the CA key pair
 	public, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	// Generate a random serial number
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, nil, err
 	}
 
+	// Create the certificate template
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
@@ -374,16 +390,19 @@ func createCertificateAuthority(ctx context.Context, s clientCorev1.SecretInterf
 		IsCA:                  true,
 	}
 
+	// Generate the x509 certificate for the CA
 	certBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, public, priv)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	// Marshal the private key to PKCS8
 	privKeyBytes, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	// Store the CA key and certificate in a secret so we can reuse when the pod restarts.
 	if _, err := s.Create(ctx, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "diy-service-mesh-ca",
@@ -404,6 +423,7 @@ func createCertificateAuthority(ctx context.Context, s clientCorev1.SecretInterf
 		return nil, nil, err
 	}
 
+	// Parse the certificate to return the x509.Certificate
 	cert, err := x509.ParseCertificate(certBytes)
 	if err != nil {
 		return nil, nil, err

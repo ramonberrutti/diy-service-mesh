@@ -263,8 +263,8 @@ func main() {
 					return
 				}
 
-				upstream, err := net.Dial("tcp", fmt.Sprintf("%s:%d", ip, port))
-				// upstream, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", ip, port), clientTLSConfig)
+				// upstream, err := net.Dial("tcp", fmt.Sprintf("%s:%d", ip, port))
+				upstream, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", ip, port), clientTLSConfig)
 				if err != nil {
 					return
 				}
@@ -320,35 +320,38 @@ func getOriginalDestination(c net.Conn) (string, uint16, error) {
 // Generate a new certificate, request a signature from the controller
 // and return the TLS configuration
 func getMTLSConfig(ctx context.Context, smv1Client smv1pb.ServiceMeshServiceClient) (*tls.Config, *tls.Config, error) {
+	// Read the service account token issued for diy-service-mesh audience
 	token, err := os.ReadFile(os.Getenv("SERVICE_MESH_TOKEN_FILE"))
 	if err != nil {
 		return nil, nil, err
 	}
-
 	tokenStr := string(token)
 
+	// Parse the token and get the service account name.
 	sa, err := getServiceAccountFromToken(tokenStr)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Generate a new key pair
-	public, priv, err := ed25519.GenerateKey(rand.Reader)
+	// Generate a new key pair.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
-	_ = public
 
+	// Generate a new certificate signing request with the service account name as the common name.
 	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
 		Subject: pkix.Name{
 			CommonName: sa,
-			Locality:   []string{os.Getenv("HOSTNAME")},
+			Locality:   []string{os.Getenv("HOSTNAME")}, // Use the hostname as the locality
 		},
 	}, priv)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	// Send the certificate signing request to the controller and get the signed certificate.
+	// The controller is responsible for verifying the service account token and the certificate signing request.
 	resp, err := smv1Client.SignCertificate(ctx, &smv1pb.SignCertificateRequest{
 		Name:  sa,
 		Token: tokenStr,
@@ -357,6 +360,8 @@ func getMTLSConfig(ctx context.Context, smv1Client smv1pb.ServiceMeshServiceClie
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// resp contains the signed certificate and the CA certificate.
 
 	cert, _ := pem.Decode(resp.Cert)
 
