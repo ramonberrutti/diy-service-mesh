@@ -1069,4 +1069,7 @@ A list of references that I used to create this project:
 - https://github.com/linkerd/linkerd2-proxy-api
 - https://www.agwa.name/blog/post/writing_an_sni_proxy_in_go
 - https://github.com/spiffe/go-spiffe
-- 
+- https://github.com/coredns/coredns/tree/master/plugin/kubernetes
+- https://github.com/kubernetes/kubernetes/tree/master/cmd/kube-proxy/app
+- https://github.com/kubernetes/kubernetes/tree/master/pkg/proxy
+- https://gist.github.com/fangdingjun/11e5d63abe9284dc0255a574a76bbcb1 (get original destination)

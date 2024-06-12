@@ -14,13 +14,10 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -55,6 +52,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	_ = clientTLSConfig
 
 	g, ctx := errgroup.WithContext(ctx)
 	// Inbound connection
@@ -96,6 +94,7 @@ func main() {
 			if err != nil {
 				return err
 			}
+			defer resp.Body.Close()
 
 			// Write response
 			if err := resp.Write(c); err != nil {
@@ -114,7 +113,7 @@ func main() {
 			go func(c net.Conn) {
 				defer c.Close()
 
-				destPort, err := originalPort(c)
+				_, destPort, err := getOriginalDestination(c)
 				if err != nil {
 					fmt.Printf("Failed to get original destination: %v\n", err)
 					return
@@ -154,79 +153,79 @@ func main() {
 		}
 	})
 
-	outboundClient := http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				// Get the services from the controller
-				host, port, err := net.SplitHostPort(addr)
-				if err != nil {
-					return nil, err
-				}
+	// outboundClient := http.Client{
+	// 	Transport: &http.Transport{
+	// 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+	// 			// Get the services from the controller
+	// 			host, port, err := net.SplitHostPort(addr)
+	// 			if err != nil {
+	// 				return nil, err
+	// 			}
 
-				if !strings.HasSuffix(host, ".svc.cluster.local") && !strings.HasSuffix(host, ".svc.cluster.local.") {
-					return net.Dial(network, addr)
-				}
+	// 			if !strings.HasSuffix(host, ".svc.cluster.local") && !strings.HasSuffix(host, ".svc.cluster.local.") {
+	// 				return net.Dial(network, addr)
+	// 			}
 
-				parts := strings.Split(host, ".")
-				if len(parts) < 5 {
-					return net.Dial(network, addr)
-				}
+	// 			parts := strings.Split(host, ".")
+	// 			if len(parts) < 5 {
+	// 				return net.Dial(network, addr)
+	// 			}
 
-				services, err := smv1Client.GetServices(ctx, &smv1pb.GetServicesRequest{
-					Services: []string{parts[1] + "/" + parts[0]},
-				})
-				if err != nil {
-					return nil, err
-				}
+	// 			services, err := smv1Client.GetServices(ctx, &smv1pb.GetServicesRequest{
+	// 				Services: []string{parts[1] + "/" + parts[0]},
+	// 			})
+	// 			if err != nil {
+	// 				return nil, err
+	// 			}
 
-				if len(services.Services) == 0 {
-					return net.Dial(network, addr)
-				}
+	// 			if len(services.Services) == 0 {
+	// 				return net.Dial(network, addr)
+	// 			}
 
-				fmt.Printf("Resolved %s to %+v\n", addr, services.Services[0])
+	// 			fmt.Printf("Resolved %s to %+v\n", addr, services.Services[0])
 
-				portInt, _ := strconv.ParseInt(port, 10, 32)
-				// TODO: check the correct port. For now, we are assuming that the port is the same
-				if portInt == 443 {
-					portInt = 80
-				}
+	// 			portInt, _ := strconv.ParseInt(port, 10, 32)
+	// 			// TODO: check the correct port. For now, we are assuming that the port is the same
+	// 			if portInt == 443 {
+	// 				portInt = 80
+	// 			}
 
-				// have port?
-				finalPort := int32(0)
-				for _, p := range services.Services[0].Ports {
-					if p.Port == int32(portInt) {
-						finalPort = p.TargetPort
-						break
-					}
-				}
+	// 			// have port?
+	// 			finalPort := int32(0)
+	// 			for _, p := range services.Services[0].Ports {
+	// 				if p.Port == int32(portInt) {
+	// 					finalPort = p.TargetPort
+	// 					break
+	// 				}
+	// 			}
 
-				if finalPort == 0 {
-					return nil, fmt.Errorf("service %s does not have port %s", addr, port)
-				}
+	// 			if finalPort == 0 {
+	// 				return nil, fmt.Errorf("service %s does not have port %s", addr, port)
+	// 			}
 
-				// Pick a random address from the list
-				validAddress := make([]string, 0)
-				for _, endpoint := range services.Services[0].Endpoints {
-					if endpoint.Ready {
-						validAddress = append(validAddress, endpoint.Addresses...)
-					}
-				}
+	// 			// Pick a random address from the list
+	// 			validAddress := make([]string, 0)
+	// 			for _, endpoint := range services.Services[0].Endpoints {
+	// 				if endpoint.Ready {
+	// 					validAddress = append(validAddress, endpoint.Addresses...)
+	// 				}
+	// 			}
 
-				if len(validAddress) == 0 {
-					return nil, fmt.Errorf("no valid endpoints for service %s", addr)
-				}
+	// 			if len(validAddress) == 0 {
+	// 				return nil, fmt.Errorf("no valid endpoints for service %s", addr)
+	// 			}
 
-				// Pick a random address from the list
-				addrPicked, _ := rand.Int(rand.Reader, big.NewInt(int64(len(validAddress))))
-				randomAddr := validAddress[addrPicked.Int64()]
+	// 			// Pick a random address from the list
+	// 			addrPicked, _ := rand.Int(rand.Reader, big.NewInt(int64(len(validAddress))))
+	// 			randomAddr := validAddress[addrPicked.Int64()]
 
-				fmt.Printf("Resolved %s:%s to %s:%d\n", host, port, randomAddr, finalPort)
-				// Look up the original destination
-				return net.Dial(network, fmt.Sprintf("%s:%d", randomAddr, finalPort))
-			},
-			TLSClientConfig: clientTLSConfig,
-		},
-	}
+	// 			fmt.Printf("Resolved %s:%s to %s:%d\n", host, port, randomAddr, finalPort)
+	// 			// Look up the original destination
+	// 			return net.Dial(network, fmt.Sprintf("%s:%d", randomAddr, finalPort))
+	// 		},
+	// 		TLSClientConfig: clientTLSConfig,
+	// 	},
+	// }
 
 	// Outbound connection
 	g.Go(func() error {
@@ -249,55 +248,46 @@ func main() {
 			go func(c net.Conn) {
 				defer c.Close()
 
+				// Get the original destination
+				ip, port, err := getOriginalDestination(c)
+				if err != nil {
+					fmt.Printf("Failed to get original destination: %v\n", err)
+					return
+				}
+
+				fmt.Printf("Outbound connection to %s:%d\n", ip, port)
+
 				// Read the request
 				req, err := http.ReadRequest(bufio.NewReader(c))
 				if err != nil {
 					return
 				}
 
-				reqDump, err := httputil.DumpRequest(req, true)
+				upstream, err := net.Dial("tcp", fmt.Sprintf("%s:%d", ip, port))
+				// upstream, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", ip, port), clientTLSConfig)
 				if err != nil {
 					return
 				}
-				fmt.Println("Request Outbound Dump:")
-				fmt.Println(string(reqDump))
+				defer upstream.Close()
 
-				fmt.Printf("Request: %+v\n", req)
+				req.Write(os.Stdout)
 
-				req.RequestURI = ""
-				req.URL.Scheme = "https"
-				req.URL.Host = req.Host
+				// Write the request
+				if err := req.Write(upstream); err != nil {
+					return
+				}
 
-				// Write the response
-				resp, err := outboundClient.Do(req)
+				// Read the response
+				resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
 				if err != nil {
-					body := fmt.Sprintf("Failed to process request (outbound: %s): %v", os.Getenv("HOSTNAME"), err)
-					rp := http.Response{
-						Status:        http.StatusText(http.StatusInternalServerError),
-						StatusCode:    http.StatusInternalServerError,
-						Proto:         "HTTP/1.1",
-						ProtoMajor:    1,
-						ProtoMinor:    1,
-						Body:          io.NopCloser(bytes.NewBufferString(body)),
-						ContentLength: int64(len(body)),
-						Header:        make(http.Header),
-					}
-
-					rp.Write(c)
 					return
 				}
 				defer resp.Body.Close()
 
-				if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
-					leaf := resp.TLS.PeerCertificates[0]
-					resp.Header.Set("X-Served-By", leaf.Subject.CommonName)
-					if len(leaf.Subject.Locality) > 0 {
-						resp.Header.Set("X-Served-By-Location", leaf.Subject.Locality[0])
-					}
+				// Write the response
+				if err := resp.Write(c); err != nil {
+					return
 				}
-
-				fmt.Printf("Request: %s Respond: %d\n", req.URL.Path, resp.StatusCode)
-				resp.Write(c)
 			}(conn)
 		}
 	})
@@ -307,20 +297,24 @@ func main() {
 	}
 }
 
-// get original destination
-func originalPort(c net.Conn) (uint16, error) {
-	f, err := c.(*net.TCPConn).File()
+func getOriginalDestination(c net.Conn) (string, uint16, error) {
+	tcpConn, ok := c.(*net.TCPConn)
+	if !ok {
+		return "", 0, fmt.Errorf("not a TCP connection")
+	}
+
+	f, err := tcpConn.File()
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	defer f.Close()
 
 	addr, err := syscall.GetsockoptIPv6Mreq(int(f.Fd()), syscall.IPPROTO_IP, SO_ORIGINAL_DST)
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
 
-	return uint16(addr.Multiaddr[2])<<8 + uint16(addr.Multiaddr[3]), nil
+	return net.IP(addr.Multiaddr[4:8]).String(), uint16(addr.Multiaddr[2])<<8 + uint16(addr.Multiaddr[3]), nil
 }
 
 // Generate a new certificate, request a signature from the controller
@@ -449,17 +443,17 @@ func getServiceAccountFromToken(token string) (string, error) {
 }
 
 func peekClientHello(c net.Conn) (*tls.ClientHelloInfo, error) {
-	h := &tls.ClientHelloInfo{}
+	var hello *tls.ClientHelloInfo
 	if err := tls.Server(c, &tls.Config{
-		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			*h = *hello
+		GetConfigForClient: func(h *tls.ClientHelloInfo) (*tls.Config, error) {
+			hello = h
 			return nil, nil
 		},
-	}).Handshake(); h == nil {
-		return nil, err
+	}).Handshake(); hello == nil {
+		return nil, fmt.Errorf("failed to peek ClientHello: %w", err)
 	}
 
-	return h, nil
+	return hello, nil
 }
 
 type connPeek struct {
