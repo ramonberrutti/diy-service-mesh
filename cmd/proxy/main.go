@@ -67,165 +67,15 @@ func main() {
 			l.Close()
 		}()
 
-		responder := func(c io.ReadWriteCloser, destPort uint16, caller string) error {
-			defer c.Close()
-
-			// Read request
-			req, err := http.ReadRequest(bufio.NewReader(c))
-			if err != nil {
-				return err
-			}
-
-			req.Header.Set("X-Called-By", caller)
-
-			upstream, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", destPort))
-			if err != nil {
-				return err
-			}
-			defer upstream.Close()
-
-			// Write request
-			if err := req.Write(upstream); err != nil {
-				return err
-			}
-
-			// Read response
-			resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-
-			// Write response
-			if err := resp.Write(c); err != nil {
-				return err
-			}
-
-			return nil
-		}
-
 		for {
 			conn, err := l.Accept()
 			if err != nil {
 				return fmt.Errorf("failed to accept: %w", err)
 			}
 
-			go func(c net.Conn) {
-				defer c.Close()
-
-				_, destPort, err := getOriginalDestination(c)
-				if err != nil {
-					fmt.Printf("Failed to get original destination: %v\n", err)
-					return
-				}
-
-				// To handle TLS and Plaintext connections
-				// first we need to peek the ClientHello
-				cp := &connPeek{c: c, peek: true, nowrite: true}
-				clientHello, err := peekClientHello(cp)
-				cp.applyPeek, cp.nowrite = true, false
-				fmt.Printf("ClientHello: %+v\n", clientHello)
-				if err != nil { // Plaintext
-					fmt.Println("Plaintext connection")
-					if err := responder(cp, destPort, "<unknown>"); err != nil {
-						fmt.Printf("Failed to respond: %v\n", err)
-					}
-				} else { // TLS
-					fmt.Println("TLS connection")
-					tlsConn := tls.Server(cp, serverTLSConfig)
-					if err := tlsConn.Handshake(); err != nil {
-						return
-					}
-
-					state := tlsConn.ConnectionState()
-					// Get common name
-					caller := "<unknown>"
-					for _, cert := range state.PeerCertificates {
-						caller = cert.Subject.CommonName
-						break
-					}
-
-					if err := responder(tlsConn, destPort, caller); err != nil {
-						fmt.Printf("Failed to respond: %v\n", err)
-					}
-				}
-			}(conn)
+			go handleInboundConnection(conn, serverTLSConfig)
 		}
 	})
-
-	// outboundClient := http.Client{
-	// 	Transport: &http.Transport{
-	// 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-	// 			// Get the services from the controller
-	// 			host, port, err := net.SplitHostPort(addr)
-	// 			if err != nil {
-	// 				return nil, err
-	// 			}
-
-	// 			if !strings.HasSuffix(host, ".svc.cluster.local") && !strings.HasSuffix(host, ".svc.cluster.local.") {
-	// 				return net.Dial(network, addr)
-	// 			}
-
-	// 			parts := strings.Split(host, ".")
-	// 			if len(parts) < 5 {
-	// 				return net.Dial(network, addr)
-	// 			}
-
-	// 			services, err := smv1Client.GetServices(ctx, &smv1pb.GetServicesRequest{
-	// 				Services: []string{parts[1] + "/" + parts[0]},
-	// 			})
-	// 			if err != nil {
-	// 				return nil, err
-	// 			}
-
-	// 			if len(services.Services) == 0 {
-	// 				return net.Dial(network, addr)
-	// 			}
-
-	// 			fmt.Printf("Resolved %s to %+v\n", addr, services.Services[0])
-
-	// 			portInt, _ := strconv.ParseInt(port, 10, 32)
-	// 			// TODO: check the correct port. For now, we are assuming that the port is the same
-	// 			if portInt == 443 {
-	// 				portInt = 80
-	// 			}
-
-	// 			// have port?
-	// 			finalPort := int32(0)
-	// 			for _, p := range services.Services[0].Ports {
-	// 				if p.Port == int32(portInt) {
-	// 					finalPort = p.TargetPort
-	// 					break
-	// 				}
-	// 			}
-
-	// 			if finalPort == 0 {
-	// 				return nil, fmt.Errorf("service %s does not have port %s", addr, port)
-	// 			}
-
-	// 			// Pick a random address from the list
-	// 			validAddress := make([]string, 0)
-	// 			for _, endpoint := range services.Services[0].Endpoints {
-	// 				if endpoint.Ready {
-	// 					validAddress = append(validAddress, endpoint.Addresses...)
-	// 				}
-	// 			}
-
-	// 			if len(validAddress) == 0 {
-	// 				return nil, fmt.Errorf("no valid endpoints for service %s", addr)
-	// 			}
-
-	// 			// Pick a random address from the list
-	// 			addrPicked, _ := rand.Int(rand.Reader, big.NewInt(int64(len(validAddress))))
-	// 			randomAddr := validAddress[addrPicked.Int64()]
-
-	// 			fmt.Printf("Resolved %s:%s to %s:%d\n", host, port, randomAddr, finalPort)
-	// 			// Look up the original destination
-	// 			return net.Dial(network, fmt.Sprintf("%s:%d", randomAddr, finalPort))
-	// 		},
-	// 		TLSClientConfig: clientTLSConfig,
-	// 	},
-	// }
 
 	// Outbound connection
 	g.Go(func() error {
@@ -245,56 +95,136 @@ func main() {
 				return fmt.Errorf("failed to accept: %w", err)
 			}
 
-			go func(c net.Conn) {
-				defer c.Close()
-
-				// Get the original destination
-				ip, port, err := getOriginalDestination(c)
-				if err != nil {
-					fmt.Printf("Failed to get original destination: %v\n", err)
-					return
-				}
-
-				fmt.Printf("Outbound connection to %s:%d\n", ip, port)
-
-				// Read the request
-				req, err := http.ReadRequest(bufio.NewReader(c))
-				if err != nil {
-					return
-				}
-
-				// upstream, err := net.Dial("tcp", fmt.Sprintf("%s:%d", ip, port))
-				upstream, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", ip, port), clientTLSConfig)
-				if err != nil {
-					return
-				}
-				defer upstream.Close()
-
-				req.Write(os.Stdout)
-
-				// Write the request
-				if err := req.Write(upstream); err != nil {
-					return
-				}
-
-				// Read the response
-				resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
-				if err != nil {
-					return
-				}
-				defer resp.Body.Close()
-
-				// Write the response
-				if err := resp.Write(c); err != nil {
-					return
-				}
-			}(conn)
+			go handleOutboundConnection(conn, clientTLSConfig)
 		}
 	})
 
 	if err := g.Wait(); err != nil {
 		panic(err)
 	}
+}
+
+func handleInboundConnection(c net.Conn, serverTLSConfig *tls.Config) {
+	defer c.Close()
+
+	_, destPort, err := getOriginalDestination(c)
+	if err != nil {
+		fmt.Printf("Failed to get original destination: %v\n", err)
+		return
+	}
+
+	// To handle TLS and Plaintext connections
+	// first we need to peek the ClientHello
+	cp := &connPeek{c: c, peek: true, nowrite: true}
+	clientHello, err := peekClientHello(cp)
+	cp.applyPeek, cp.nowrite = true, false
+	fmt.Printf("ClientHello: %+v\n", clientHello)
+	if err != nil { // Plaintext
+		fmt.Println("Plaintext connection")
+		if err := responder(cp, destPort, "<unknown>"); err != nil {
+			fmt.Printf("Failed to respond: %v\n", err)
+		}
+	} else { // TLS
+		fmt.Println("TLS connection")
+		tlsConn := tls.Server(cp, serverTLSConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			return
+		}
+
+		state := tlsConn.ConnectionState()
+		// Get common name
+		caller := "<unknown>"
+		for _, cert := range state.PeerCertificates {
+			caller = cert.Subject.CommonName
+			break
+		}
+
+		if err := responder(tlsConn, destPort, caller); err != nil {
+			fmt.Printf("Failed to respond: %v\n", err)
+		}
+	}
+}
+
+func handleOutboundConnection(c net.Conn, clientTLSConfig *tls.Config) {
+	defer c.Close()
+
+	// Get the original destination
+	ip, port, err := getOriginalDestination(c)
+	if err != nil {
+		fmt.Printf("Failed to get original destination: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Outbound connection to %s:%d\n", ip, port)
+
+	// Read the request
+	req, err := http.ReadRequest(bufio.NewReader(c))
+	if err != nil {
+		return
+	}
+
+	// upstream, err := net.Dial("tcp", fmt.Sprintf("%s:%d", ip, port))
+	upstream, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", ip, port), clientTLSConfig)
+	if err != nil {
+		return
+	}
+	defer upstream.Close()
+
+	req.Write(os.Stdout)
+
+	// Write the request
+	if err := req.Write(upstream); err != nil {
+		return
+	}
+
+	// Read the response
+	resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	// Write the response
+	if err := resp.Write(c); err != nil {
+		return
+	}
+}
+
+func responder(c io.ReadWriteCloser, destPort uint16, caller string) error {
+	defer c.Close()
+
+	// Read request
+	req, err := http.ReadRequest(bufio.NewReader(c))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("X-Called-By", caller)
+
+	upstream, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", destPort))
+	if err != nil {
+		return err
+	}
+	defer upstream.Close()
+
+	// Write request
+	if err := req.Write(upstream); err != nil {
+		return err
+	}
+
+	// Read response
+	resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Write response
+	if err := resp.Write(c); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func getOriginalDestination(c net.Conn) (string, uint16, error) {
