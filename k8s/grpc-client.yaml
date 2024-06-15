@@ -1,0 +1,28 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grpc-client
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: grpc-client
+  name: grpc-client
+  labels:
+    app: grpc-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grpc-client
+  template:
+    metadata:
+      labels:
+        app: grpc-client
+        # service-mesh: enabled
+    spec:
+      containers:
+      - name: grpc-client
+        image: diy-sm-grpc-client
+        imagePullPolicy: IfNotPresent

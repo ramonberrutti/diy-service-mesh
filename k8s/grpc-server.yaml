@@ -1,0 +1,48 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grpc-server
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: grpc-server
+  name: grpc-server
+  labels:
+    app: grpc-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: grpc-server
+  template:
+    metadata:
+      labels:
+        app: grpc-server
+        # service-mesh: enabled
+    spec:
+      containers:
+      - name: grpc-server
+        image: diy-sm-grpc-server
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        env:
+        - name: VERSION
+          value: "1.0"
+        - name: FAIL_RATE
+          value: "0"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: grpc-server
+  name: grpc-server
+spec:
+  selector:
+    app: grpc-server
+  ports:
+  - protocol: TCP
+    port: 8080
+    targetPort: 8080

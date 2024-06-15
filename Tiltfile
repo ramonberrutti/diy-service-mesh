@@ -112,6 +112,42 @@ docker_build(
     },
 )
 
+# Generate the grpc-client image.
+docker_build(
+    'diy-sm-grpc-client',
+    context='.',
+    dockerfile='./Dockerfile',
+    only=[
+        './go.mod', 
+        './go.sum', 
+        './cmd/grpc-client/',
+        './internal/',
+        './protogen/',
+        './vendor/',
+    ],
+    build_args={
+        'APP_NAME': 'grpc-client',
+    },
+)
+
+# Generate the grpc-client image.
+docker_build(
+    'diy-sm-grpc-server',
+    context='.',
+    dockerfile='./Dockerfile',
+    only=[
+        './go.mod', 
+        './go.sum', 
+        './cmd/grpc-server/',
+        './internal/',
+        './protogen/',
+        './vendor/',
+    ],
+    build_args={
+        'APP_NAME': 'grpc-server',
+    },
+)
+
 # Generate the proto files
 local_resource(
     'protobuild',
@@ -127,3 +163,5 @@ k8s_yaml('k8s/controller.yaml')
 k8s_yaml('k8s/injector.yaml', allow_duplicates=True)
 k8s_yaml('k8s/app-a.yaml')
 k8s_yaml('k8s/app-b.yaml')
+k8s_yaml('k8s/grpc-client.yaml')
+k8s_yaml('k8s/grpc-server.yaml')
