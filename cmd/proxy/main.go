@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -31,6 +33,8 @@ import (
 
 const (
 	SO_ORIGINAL_DST = 80
+
+	HTTP2_PREFACE = "PRI * HTTP/2.0"
 )
 
 func main() {
@@ -136,7 +140,7 @@ func handleInboundConnection(c net.Conn, serverTLSConfig *tls.Config) {
 	}
 }
 
-func handleOutboundConnection(c net.Conn, clientTLSConfig *tls.Config) {
+func handleOutboundConnection(c net.Conn, _ *tls.Config) {
 	defer c.Close()
 
 	// Get the original destination
@@ -146,38 +150,375 @@ func handleOutboundConnection(c net.Conn, clientTLSConfig *tls.Config) {
 		return
 	}
 
-	fmt.Printf("Outbound connection to %s:%d\n", ip, port)
+	b := bufio.NewReaderSize(c, 14)
 
-	// Read the request
-	req, err := http.ReadRequest(bufio.NewReader(c))
+	// Check if is http2
+	peek, err := b.Peek(14)
 	if err != nil {
 		return
 	}
 
-	// upstream, err := net.Dial("tcp", fmt.Sprintf("%s:%d", ip, port))
-	upstream, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", ip, port), clientTLSConfig)
+	isH2 := string(peek) == HTTP2_PREFACE
+
+	upstream, err := net.Dial("tcp", fmt.Sprintf("%s:%d", ip, port))
+	// upstream, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", ip, port), clientTLSConfig)
 	if err != nil {
 		return
 	}
 	defer upstream.Close()
 
-	req.Write(os.Stdout)
+	if isH2 {
+		// go func() {
+		// 	io.Copy(upstream, b)
+		// }()
 
-	// Write the request
-	if err := req.Write(upstream); err != nil {
-		return
-	}
+		// io.Copy(c, io.TeeReader(upstream, os.Stdout))
+		// return
+		fmt.Println("HTTP/2 connection")
 
-	// Read the response
-	resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
+		// Read preface
+		prefare := make([]byte, len(http2.ClientPreface))
+		if _, err := io.ReadFull(b, prefare); err != nil {
+			fmt.Printf("Failed to read preface: %v\n", err)
+			return
+		}
 
-	// Write the response
-	if err := resp.Write(c); err != nil {
-		return
+		fmt.Printf("Preface: %s\n", prefare)
+
+		// Write preface
+		if _, err := upstream.Write(prefare); err != nil {
+			fmt.Printf("Failed to write preface: %v\n", err)
+			return
+		}
+
+		framer := http2.NewFramer(c, b)
+		framer.SetReuseFrames()
+		framer.ReadMetaHeaders = hpack.NewDecoder(4096, nil)
+		framer.MaxHeaderListSize = uint32(16 << 20)
+
+		upstreamFramer := http2.NewFramer(upstream, upstream)
+		upstreamFramer.SetReuseFrames()
+		upstreamFramer.ReadMetaHeaders = hpack.NewDecoder(4096, nil)
+		upstreamFramer.MaxHeaderListSize = uint32(16 << 20)
+
+		go func() {
+			for {
+				frame, err := framer.ReadFrame()
+				if err != nil {
+					fmt.Printf("Failed to read outbound frame: %v\n", err)
+					return
+				}
+
+				fmt.Printf("Outbound Frame: %+v\n", frame)
+
+				switch frame := frame.(type) {
+				case *http2.DataFrame:
+					fmt.Println("Outbound DataFrame")
+
+					fmt.Printf("Data: %s\n", frame.Data())
+
+					if err := upstreamFramer.WriteData(frame.StreamID, frame.StreamEnded(), frame.Data()); err != nil {
+						fmt.Printf("Failed to write frame: %v\n", err)
+						return
+					}
+
+				case *http2.MetaHeadersFrame:
+					fmt.Println("Outbound MetaHeadersFrame")
+
+					hBuf := new(bytes.Buffer)
+					hEnc := hpack.NewEncoder(hBuf)
+
+					for _, f := range frame.Fields {
+						fmt.Printf("Header: %s: %s\n", f.Name, f.Value)
+						if err := hEnc.WriteField(f); err != nil {
+							fmt.Printf("Failed to write field: %v\n", err)
+						}
+					}
+
+					first, done := true, false
+					for !done {
+						size := hBuf.Len()
+						if size > 16384 {
+							size = 16384
+						} else {
+							done = true
+						}
+
+						if first {
+							first = false
+							if err := upstreamFramer.WriteHeaders(http2.HeadersFrameParam{
+								StreamID:      frame.StreamID,
+								EndStream:     frame.StreamEnded(),
+								EndHeaders:    done,
+								BlockFragment: hBuf.Next(size),
+								Priority:      frame.Priority,
+								PadLength:     0,
+							}); err != nil {
+								fmt.Printf("Failed to write frame: %v\n", err)
+								return
+							}
+						} else {
+							if err := upstreamFramer.WriteContinuation(frame.StreamID, done, hBuf.Next(size)); err != nil {
+								fmt.Printf("Failed to write frame: %v\n", err)
+								return
+							}
+						}
+					}
+
+				case *http2.HeadersFrame:
+					// Print the headers
+					fmt.Printf("Outbound Headers: %s\n", frame.HeaderBlockFragment())
+
+					fmt.Println("HeadersFrame")
+					if err := upstreamFramer.WriteHeaders(http2.HeadersFrameParam{
+						StreamID:      frame.StreamID,
+						EndStream:     frame.StreamEnded(),
+						EndHeaders:    frame.HeadersEnded(),
+						BlockFragment: frame.HeaderBlockFragment(),
+						Priority:      frame.Priority,
+						PadLength:     0,
+					}); err != nil {
+						fmt.Printf("Failed to write frame: %v\n", err)
+						return
+					}
+
+				case *http2.PriorityFrame:
+					fmt.Println("PriorityFrame")
+					if err := upstreamFramer.WritePriority(frame.StreamID, frame.PriorityParam); err != nil {
+						fmt.Printf("Failed to write frame: %v\n", err)
+						return
+					}
+
+				case *http2.RSTStreamFrame:
+					fmt.Println("RSTStreamFrame")
+					if err := upstreamFramer.WriteRSTStream(frame.StreamID, frame.ErrCode); err != nil {
+						fmt.Printf("Failed to write frame: %v\n", err)
+						return
+					}
+
+				case *http2.SettingsFrame:
+					fmt.Println("Outbound SettingsFrame")
+					settings := make([]http2.Setting, frame.NumSettings())
+					for i := 0; i < frame.NumSettings(); i++ {
+						settings[i] = frame.Setting(i)
+					}
+
+					if frame.IsAck() {
+						upstreamFramer.WriteSettingsAck()
+					} else {
+						upstreamFramer.WriteSettings(settings...)
+					}
+
+				case *http2.PushPromiseFrame:
+					fmt.Println("PushPromiseFrame")
+					if err := upstreamFramer.WritePushPromise(http2.PushPromiseParam{}); err != nil {
+						fmt.Printf("Failed to write frame: %v\n", err)
+						return
+					}
+
+				case *http2.PingFrame:
+					fmt.Println("PingFrame")
+					if err := upstreamFramer.WritePing(true, frame.Data); err != nil {
+						fmt.Printf("Failed to write frame: %v\n", err)
+						return
+					}
+
+				case *http2.GoAwayFrame:
+					fmt.Println("GoAwayFrame")
+					if err := upstreamFramer.WriteGoAway(frame.LastStreamID, frame.ErrCode, frame.DebugData()); err != nil {
+						fmt.Printf("Failed to write frame: %v\n", err)
+						return
+					}
+
+				case *http2.WindowUpdateFrame:
+					fmt.Println("WindowUpdateFrame")
+					if err := upstreamFramer.WriteWindowUpdate(frame.StreamID, frame.Increment); err != nil {
+						fmt.Printf("Failed to write frame: %v\n", err)
+						return
+					}
+
+				case *http2.ContinuationFrame:
+					fmt.Println("ContinuationFrame")
+					if err := upstreamFramer.WriteContinuation(frame.StreamID, frame.HeadersEnded(), frame.HeaderBlockFragment()); err != nil {
+						fmt.Printf("Failed to write frame: %v\n", err)
+						return
+					}
+
+				default:
+					fmt.Printf("Unknown outgoing type %T frame: %+v\n", frame, frame)
+				}
+			}
+		}()
+
+		// Read the response
+		for {
+			frame, err := upstreamFramer.ReadFrame()
+			if err != nil {
+				fmt.Printf("Failed to read inbound frame: %v\n", err)
+				return
+			}
+
+			fmt.Printf("Inbound Frame: %+v\n", frame)
+
+			switch frame := frame.(type) {
+			case *http2.DataFrame:
+				fmt.Println("DataFrame")
+				if err := framer.WriteData(frame.StreamID, frame.StreamEnded(), frame.Data()); err != nil {
+					fmt.Printf("Failed to write frame: %v\n", err)
+					return
+				}
+
+			case *http2.MetaHeadersFrame:
+				fmt.Println("Inbound MetaHeadersFrame")
+
+				hBuf := new(bytes.Buffer)
+				hEnc := hpack.NewEncoder(hBuf)
+
+				for _, f := range frame.Fields {
+					fmt.Printf("Header: %s: %s\n", f.Name, f.Value)
+					if err := hEnc.WriteField(f); err != nil {
+						fmt.Printf("Failed to write field: %v\n", err)
+					}
+				}
+
+				first, done := true, false
+				for !done {
+					size := hBuf.Len()
+					if size > 16384 {
+						size = 16384
+					} else {
+						done = true
+					}
+
+					if first {
+						first = false
+						if err := framer.WriteHeaders(http2.HeadersFrameParam{
+							StreamID:      frame.StreamID,
+							EndStream:     frame.StreamEnded(),
+							EndHeaders:    done,
+							BlockFragment: hBuf.Next(size),
+							Priority:      frame.Priority,
+							PadLength:     0,
+						}); err != nil {
+							fmt.Printf("Failed to write frame: %v\n", err)
+							return
+						}
+					} else {
+						if err := framer.WriteContinuation(frame.StreamID, done, hBuf.Next(size)); err != nil {
+							fmt.Printf("Failed to write frame: %v\n", err)
+							return
+						}
+					}
+				}
+
+			case *http2.HeadersFrame:
+				fmt.Println("HeadersFrame")
+				if err := framer.WriteHeaders(http2.HeadersFrameParam{
+					StreamID:      frame.StreamID,
+					EndStream:     frame.StreamEnded(),
+					EndHeaders:    frame.HeadersEnded(),
+					BlockFragment: frame.HeaderBlockFragment(),
+					Priority:      frame.Priority,
+					PadLength:     0,
+				}); err != nil {
+					fmt.Printf("Failed to write frame: %v\n", err)
+					return
+				}
+
+			case *http2.PriorityFrame:
+				fmt.Println("PriorityFrame")
+				if err := framer.WritePriority(frame.StreamID, frame.PriorityParam); err != nil {
+					fmt.Printf("Failed to write frame: %v\n", err)
+					return
+				}
+
+			case *http2.RSTStreamFrame:
+				fmt.Println("RSTStreamFrame")
+				if err := framer.WriteRSTStream(frame.StreamID, frame.ErrCode); err != nil {
+					fmt.Printf("Failed to write frame: %v\n", err)
+					return
+				}
+
+			case *http2.SettingsFrame:
+				fmt.Println("Inbound SettingsFrame")
+				settings := make([]http2.Setting, frame.NumSettings())
+				for i := 0; i < frame.NumSettings(); i++ {
+					settings[i] = frame.Setting(i)
+				}
+
+				if frame.IsAck() {
+					framer.WriteSettingsAck()
+				} else {
+					if err := framer.WriteSettings(settings...); err != nil {
+						fmt.Printf("Failed to write frame: %v\n", err)
+						return
+					}
+				}
+
+			case *http2.PushPromiseFrame:
+				fmt.Println("PushPromiseFrame")
+				if err := framer.WritePushPromise(http2.PushPromiseParam{}); err != nil {
+					fmt.Printf("Failed to write frame: %v\n", err)
+					return
+				}
+
+			case *http2.PingFrame:
+				fmt.Println("PingFrame")
+				if err := framer.WritePing(true, frame.Data); err != nil {
+					fmt.Printf("Failed to write frame: %v\n", err)
+					return
+				}
+
+			case *http2.GoAwayFrame:
+				fmt.Println("GoAwayFrame")
+				if err := framer.WriteGoAway(frame.LastStreamID, frame.ErrCode, frame.DebugData()); err != nil {
+					fmt.Printf("Failed to write frame: %v\n", err)
+					return
+				}
+
+			case *http2.WindowUpdateFrame:
+				fmt.Println("WindowUpdateFrame")
+				if err := framer.WriteWindowUpdate(frame.StreamID, frame.Increment); err != nil {
+					fmt.Printf("Failed to write frame: %v\n", err)
+					return
+				}
+
+			case *http2.ContinuationFrame:
+				fmt.Println("ContinuationFrame")
+				if err := framer.WriteContinuation(frame.StreamID, frame.HeadersEnded(), frame.HeaderBlockFragment()); err != nil {
+					fmt.Printf("Failed to write frame: %v\n", err)
+					return
+				}
+
+			default:
+				fmt.Printf("Unknown inbound frame: %+v\n", frame)
+			}
+		}
+	} else {
+		// Read the request
+		req, err := http.ReadRequest(b)
+		if err != nil {
+			return
+		}
+
+		req.Write(os.Stdout)
+
+		// Write the request
+		if err := req.Write(upstream); err != nil {
+			return
+		}
+
+		// Read the response
+		resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+
+		// Write the response
+		if err := resp.Write(c); err != nil {
+			return
+		}
 	}
 }
 
