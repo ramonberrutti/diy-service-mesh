@@ -57,50 +57,41 @@ func main() {
 	g, ctx := errgroup.WithContext(ctx)
 	// Inbound connection
 	g.Go(func() error {
-		l, err := net.Listen("tcp", ":4000")
-		if err != nil {
-			return fmt.Errorf("failed to listen: %w", err)
-		}
-		defer l.Close()
-		go func() {
-			<-ctx.Done()
-			l.Close()
-		}()
-
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return fmt.Errorf("failed to accept: %w", err)
-			}
-
-			go handleInboundConnection(conn, serverTLSConfig)
-		}
+		return listen(ctx, ":4000", func(conn net.Conn) {
+			handleInboundConnection(conn, serverTLSConfig)
+		})
 	})
 
 	// Outbound connection
 	g.Go(func() error {
-		l, err := net.Listen("tcp", ":5000")
-		if err != nil {
-			return fmt.Errorf("failed to listen: %w", err)
-		}
-		defer l.Close()
-		go func() {
-			<-ctx.Done()
-			l.Close()
-		}()
-
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return fmt.Errorf("failed to accept: %w", err)
-			}
-
-			go handleOutboundConnection(conn, clientTLSConfig)
-		}
+		return listen(ctx, ":5000", func(conn net.Conn) {
+			handleOutboundConnection(conn, clientTLSConfig)
+		})
 	})
 
 	if err := g.Wait(); err != nil {
 		panic(err)
+	}
+}
+
+func listen(ctx context.Context, addr string, accept func(net.Conn)) error {
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to listen: %w", err)
+	}
+	defer l.Close()
+	go func() {
+		<-ctx.Done()
+		l.Close()
+	}()
+
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			return fmt.Errorf("failed to accept: %w", err)
+		}
+
+		go accept(conn)
 	}
 }
 
