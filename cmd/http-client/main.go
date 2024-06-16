@@ -7,11 +7,12 @@ import (
 	"net/http/httputil"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	n := 0
 

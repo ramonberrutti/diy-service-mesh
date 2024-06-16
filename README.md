@@ -5,20 +5,23 @@ DESCLAIMER: This is a work in progress, the code is not complete and is not work
 This is a Do-It-Yourself Service Mesh, which is a simple tutorial for understanding 
 the internals of a service mesh. The goal of this project is to provide a simple, 
 easy-to-understand reference implementation of a service mesh, which can be used 
-to learn about the various concepts and technologies used in a service mesh.
+to learn about the various concepts and technologies used by a service mesh like Linkerd.
 
 ## What are you going to learn?
 
-- How to build a simple proxy and add service mesh features to it.
-- How to use Netfilter to intercept and modify network packets.
-- How to create a simple control plane to manage the service mesh.
-- How to use gRPC to communicate between the data plane and the control plane.
+- Build a simple proxy and add service mesh features to it.
+- Use Netfilter to intercept and modify network packets.
+- Create a simple control plane to manage the service mesh.
+- Use gRPC to communicate between the proxy and the control plane.
 - How to create a Admision Controller to validate and mutate Kubernetes resources.
+- Certificate generation flow and mTLS between the services.
+- How HTTP/2 works and how to use it with gRPC to balance the traffic between the services.
 
 ## Some considerations
 
 - This is only for learning propose, not a production-ready service mesh.
-- We are going to use IPTables instead of eBPF or Nftables for simplicity.
+- The proxy is going to print the request and response, so we can understand what is happening, in a real-world scenario we shouldn't buffer the request and response and be the most transparent as possible.
+- We are going to use IPTables instead Nftables for simplicity.
 - We are going to keep the code as simple as possible to make it easy to understand.
 - Some Golang errors are ignored for simplicity, in a real-world scenario you should handle them properly.
 
@@ -30,7 +33,7 @@ We are going to keep the project in a monorepo, which will contain the following
 - **proxy**: This is the data plane of the service mesh, which is responsible for intercepting and modifying network packets.
 - **controller**: This is the control plane of the service mesh, which is responsible to provide the configuration to the data plane.
 - **injector**: This is an Admission Controller for Kubernetes, which is responsible for mutating each pod that we want to use the service mesh.
-- **samples apps**: Two simple applications that are going to communicate with each other.
+- **samples apps**: Four simple applications that are going to communicate with each other. (http-client, http-server, grpc-client, grpc-server)
 
 ## Tools and how to run this project?
 
@@ -50,8 +53,9 @@ tilt up
 ```
 
 Tilt will build all the images and deploy all the components to the Kubernetes cluster.
+All the images are created by the `Dockerfile` in the root directory.
 
-The main branch contains the final version of the project.
+The **main branch** contains the WIP version of the project.
 
 ## Architecture
 
@@ -59,35 +63,46 @@ The architecture of the service mesh is composed of the following components:
 
 ![Architecture](./docs/images/architecture.png)
 
-## Creating the applications
+## Creating the http applications
 
-We are going to create two applications:
+First we are going to create two simple http applications, one is going to be the client and the other the server.
+Because gRPC is a bit more complex, we are going to learn about H2 and gRPC in the next steps.
 
-- **app-a**: This application if going to call the `app-b` service.
-- **app-b**: This application is going to be called by the `app-a` service.
+We are going to create four applications:
 
-We are going to deploy app-b two times, one with the version `v1` and another with the version `v2`.
+- **http-client**: This application if going to call the `http-server` service.
+- **http-server**: This application is going to be called by the `http-client` service.
 
-app-a:
+http-client:
 
 ```go
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	n := 0
-	// This application will call the `app-b` every second
+
+	endpoint := os.Getenv("ENDPOINT")
+	if endpoint == "" {
+		endpoint = "http://http-server.http-server.svc.cluster.local./hello"
+	}
+
+	httpClient := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	// This application will call the endpoint every second
 	ticker := time.NewTicker(time.Second)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://app-b.app-b.svc.cluster.local./hello", nil)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 			if err != nil {
 				panic(err)
 			}
 
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := httpClient.Do(req)
 			if err != nil {
 				panic(err)
 			}
@@ -106,13 +121,11 @@ func main() {
 }
 ```
 
-As we can see, the `app-a` is going to call the `app-b` service every second, and print the response.
-
-app-b:
+http-server:
 
 ```go
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	failRate, _ := strconv.Atoi(os.Getenv("FAIL_RATE"))
@@ -122,7 +135,7 @@ func main() {
 	version := os.Getenv("VERSION")
 
 	var b bytes.Buffer
-	b.WriteString("Hello from app-b service! Hostname: ")
+	b.WriteString("Hello from the http-server service! Hostname: ")
 	b.WriteString(hostname)
 	b.WriteString(" Version: ")
 	b.WriteString(version)
@@ -130,14 +143,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
 		// Dump the request
-		dump, err := httputil.DumpRequest(r, true)
-		if err != nil {
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			fmt.Println("Failed to process request")
-			return
-		}
+		dump, _ := httputil.DumpRequest(r, true)
 		fmt.Printf("Request #%d\n", atomic.AddUint64(&n, 1))
 		fmt.Println(string(dump))
+		fmt.Println("---")
 
 		// Simulate failure
 		if failRate > 0 {
@@ -178,19 +187,19 @@ func main() {
 }
 ```
 
-The `app-b` service is going to respond with a message that contains the hostname and the version of the service. 
+The `http-server` service is going to respond with a message that contains the hostname and the version of the service. 
 We are going to simulate failures by setting the `FAIL_RATE` environment variable.
 
 Each service is going to be deployed in a different namespace:
 
-- app-a: `app-a` Deployment in the `app-a` namespace: [app-a.yaml](./k8s/app-a.yaml)
-- app-b: `app-b` Deployment in the `app-b` namespace: [app-b.yaml](./k8s/app-b.yaml)
+- http-client: `http-client` Deployment in the `http-client` namespace: [http-client.yaml](./k8s/http-client.yaml)
+- http-server: `http-server` Deployment in the `http-server` namespace: [http-server.yaml](./k8s/http-server.yaml)
 
 ## Testing the service mesh
 
 We can check the logs of the `app-a` and `app-b` services to see the communication between them.
 
-app-a logs:
+http-client logs:
 ```bash
 Response #311
 HTTP/1.1 200 OK
@@ -198,24 +207,34 @@ Content-Length: 71
 Content-Type: text/plain
 Date: Sat, 08 Jun 2024 19:38:27 GMT
 
-Hello from app-b service! Hostname: app-b-799c77dc9b-56lmd Version: 1.0
+Hello from http-server service! Hostname: http-server-799c77dc9b-56lmd Version: 1.0
 ```
 
-app-b logs:
+http-server logs:
 ```bash
 Request #171
 GET /hello HTTP/1.1
-Host: app-b.app-b.svc.cluster.local.
+Host: http-server.http-server.svc.cluster.local.
 Accept-Encoding: gzip
 User-Agent: Go-http-client/1.1
 ```
 
 ## We are going to implement a simple proxy that will intercept the network requests and responses.
 
-As we see in the architecture diagram, the proxy is going to intercept the network packets and forward them to the destination service.
-To do this we are going to listen in a specific port, intercept the packets, and forward them to the destination service, for inbound and outbound traffic.
+### Why we need a proxy?
 
-This is a basic implementation of the proxy, that will intercept and forward the packets:
+The proxy is going to intercept all of the inbound and outbound traffic of the services. (except that we configure to ignore)
+Linkerd has a Rust based proxy called `linkerd2-proxy` and Istio has a C++ based proxy called `Envoy`, 
+which is a very powerful proxy with a lot of features.
+
+Our proxy is going to be very simple, we are going to use Go to implement it.
+
+For now, the proxy is going to listen on two ports, one for the inbound traffic and another for the outbound traffic.
+
+- 4000 for the inbound traffic.
+- 5000 for the outbound traffic.
+
+This is a basic implementation of the proxy, intercepting http requests and responses.
 
 ```go
 func main() {
@@ -225,160 +244,55 @@ func main() {
 	g, ctx := errgroup.WithContext(ctx)
 	// Inbound connection
 	g.Go(func() error {
-		l, err := net.Listen("tcp", ":4000")
-		if err != nil {
-			return fmt.Errorf("failed to listen: %w", err)
-		}
-		defer l.Close()
-		go func() {
-			<-ctx.Done()
-			l.Close()
-		}()
-
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return fmt.Errorf("failed to accept: %w", err)
-			}
-
-			go func(c net.Conn) {
-				defer c.Close()
-
-				destPort, err := originalPort(c)
-				if err != nil {
-					fmt.Printf("Failed to get original destination: %v\n", err)
-					return
-				}
-
-				// Read the request
-				req, err := http.ReadRequest(bufio.NewReader(c))
-				if err != nil {
-					return
-				}
-
-				reqDump, err := httputil.DumpRequest(req, true)
-				if err != nil {
-					return
-				}
-				fmt.Println("Request Inbound Dump:")
-				fmt.Println(string(reqDump))
-
-				req.RequestURI = ""
-				req.URL.Scheme = "http"
-				req.URL.Host = req.Host
-
-				inboundClient := http.Client{
-					Transport: &http.Transport{
-						DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-							return net.Dial(network, fmt.Sprintf("127.0.0.1:%d", destPort))
-						},
-					},
-				}
-
-				// Perform the request
-				resp, err := inboundClient.Do(req)
-				if err != nil {
-					body := fmt.Sprintf("Failed to process request (inbound: %s): %v", os.Getenv("HOSTNAME"), err)
-					rp := http.Response{
-						Status:        http.StatusText(http.StatusInternalServerError),
-						StatusCode:    http.StatusInternalServerError,
-						Proto:         "HTTP/1.1",
-						ProtoMajor:    1,
-						ProtoMinor:    1,
-						Body:          io.NopCloser(bytes.NewBufferString(body)),
-						ContentLength: int64(len(body)),
-						Header:        make(http.Header),
-					}
-
-					rp.Write(c)
-					return
-				}
-				defer resp.Body.Close()
-
-				fmt.Printf("Request: %s Respond: %d\n", req.URL.Path, resp.StatusCode)
-				resp.Write(c)
-			}(conn)
-		}
+		return listen(ctx, ":4000", handleInboundConnection)
 	})
-
-	outboundClient := http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-                // WE ARE GOING TO MODIFY THIS PART IN THE NEXT STEP
-                return net.Dial(network, addr)
-			},
-		},
-	}
 
 	// Outbound connection
 	g.Go(func() error {
-		l, err := net.Listen("tcp", ":5000")
-		if err != nil {
-			return fmt.Errorf("failed to listen: %w", err)
-		}
-		defer l.Close()
-		go func() {
-			<-ctx.Done()
-			l.Close()
-		}()
-
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return fmt.Errorf("failed to accept: %w", err)
-			}
-
-			go func(c net.Conn) {
-				defer c.Close()
-
-				// Read the request
-				req, err := http.ReadRequest(bufio.NewReader(c))
-				if err != nil {
-					return
-				}
-
-				reqDump, err := httputil.DumpRequest(req, true)
-				if err != nil {
-					return
-				}
-				fmt.Println("Request Outbound Dump:")
-				fmt.Println(string(reqDump))
-
-				req.RequestURI = ""
-				req.URL.Scheme = "http"
-				req.URL.Host = req.Host
-
-				// Write the response
-				resp, err := outboundClient.Do(req)
-				if err != nil {
-					body := fmt.Sprintf("Failed to process request (outbound: %s): %v", os.Getenv("HOSTNAME"), err)
-					rp := http.Response{
-						Status:        http.StatusText(http.StatusInternalServerError),
-						StatusCode:    http.StatusInternalServerError,
-						Proto:         "HTTP/1.1",
-						ProtoMajor:    1,
-						ProtoMinor:    1,
-						Body:          io.NopCloser(bytes.NewBufferString(body)),
-						ContentLength: int64(len(body)),
-						Header:        make(http.Header),
-					}
-
-					rp.Write(c)
-					return
-				}
-				defer resp.Body.Close()
-
-				fmt.Printf("Request: %s Respond: %d\n", req.URL.Path, resp.StatusCode)
-				resp.Write(c)
-			}(conn)
-		}
+		return listen(ctx, ":5000", handleOutboundConnection)
 	})
 
 	if err := g.Wait(); err != nil {
 		panic(err)
 	}
 }
+
+func listen(ctx context.Context, addr string, accept func(net.Conn)) error {
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to listen: %w", err)
+	}
+	defer l.Close()
+	go func() {
+		<-ctx.Done()
+		l.Close()
+	}()
+
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			return fmt.Errorf("failed to accept: %w", err)
+		}
+
+		go accept(conn)
+	}
+}
 ```
+
+The `listen` function is going to listen on the port and call the `accept` function when a connection is established.
+
+
+### handleInboundConnection
+
+All the inbound traffic is going to be intercepted by the proxy and we are going to print the request and response and forward the request to the correct service.
+
+```go
+
+
+
+```
+
+
 
 We are using port `4000` for the inbound traffic and port `5000` for the outbound traffic.
 In the next steps we are going to add retries, metrics and canary deployments to the proxy and finally mTLS between the services.
@@ -1306,15 +1220,24 @@ func (s *serviceMeshServer) SignCertificate(ctx context.Context, req *smv1pb.Sig
 }
 ```
 
+## Challenges for you
+
+- Add TLS between the controller and the proxy.
+- Support opaque traffic between the services.
+- Add circuit breaker to the proxy.
+- Balance gRPC traffic between the services. Hint: https://pkg.go.dev/golang.org/x/net/http2 Framer and Transport.
+- Replace the mTLS implementation with SPIFFE.
+- Add support for WebSockets.
+
 ## References
 
 A list of references that I used to create this project:
 
-- https://github.com/istio/istio
-- https://github.com/istio/api
+- https://buoyant.io/service-mesh-manifesto
 - https://github.com/linkerd/linkerd2
 - https://github.com/linkerd/linkerd2-proxy
 - https://github.com/linkerd/linkerd2-proxy-api
+- https://linkerd.io/2020/07/23/under-the-hood-of-linkerds-state-of-the-art-rust-proxy-linkerd2-proxy/
 - https://www.agwa.name/blog/post/writing_an_sni_proxy_in_go
 - https://github.com/spiffe/go-spiffe
 - https://github.com/coredns/coredns/tree/master/plugin/kubernetes

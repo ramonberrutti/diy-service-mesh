@@ -11,12 +11,13 @@ import (
 	"os/signal"
 	"strconv"
 	"sync/atomic"
+	"syscall"
 
 	"golang.org/x/sync/errgroup"
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	failRate, _ := strconv.Atoi(os.Getenv("FAIL_RATE"))
