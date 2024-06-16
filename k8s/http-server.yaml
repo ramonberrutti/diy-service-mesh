@@ -2,29 +2,42 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: app-b
+  name: http-server
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: http-server
+  name: http-server
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  namespace: app-b
-  name: app-b
+  namespace: http-server
+  name: http-server
   labels:
-    app: app-b
+    app: http-server
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: app-b
+      app: http-server
   template:
     metadata:
       labels:
-        app: app-b
+        app: http-server
         service-mesh: enabled
     spec:
+      serviceAccountName: http-server
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
       containers:
-      - name: app-b
-        image: diy-sm-app-b
+      - name: http-server
+        image: diy-sm-http-server
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
@@ -37,11 +50,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  namespace: app-b
-  name: app-b
+  namespace: http-server
+  name: http-server
 spec:
   selector:
-    app: app-b
+    app: http-server
   ports:
   - protocol: TCP
     port: 80

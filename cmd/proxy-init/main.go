@@ -39,7 +39,7 @@ func main() {
 
 	for _, cmd := range commands {
 		if err := cmd.Run(); err != nil {
-			fmt.Printf("failed to run command: %v\n", err)
+			panic(fmt.Sprintf("failed to run command %s: %v\n", cmd.String(), err))
 		}
 	}
 

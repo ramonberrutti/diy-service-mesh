@@ -26,7 +26,7 @@ func main() {
 	version := os.Getenv("VERSION")
 
 	var b bytes.Buffer
-	b.WriteString("Hello from app-b service! Hostname: ")
+	b.WriteString("Hello from the http-server service! Hostname: ")
 	b.WriteString(hostname)
 	b.WriteString(" Version: ")
 	b.WriteString(version)
@@ -42,6 +42,7 @@ func main() {
 		}
 		fmt.Printf("Request #%d\n", atomic.AddUint64(&n, 1))
 		fmt.Println(string(dump))
+		fmt.Println("---")
 
 		// Simulate failure
 		if failRate > 0 {

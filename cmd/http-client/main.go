@@ -15,18 +15,23 @@ func main() {
 	defer cancel()
 	n := 0
 
+	endpoint := os.Getenv("ENDPOINT")
+	if endpoint == "" {
+		endpoint = "http://http-server.http-server.svc.cluster.local./hello"
+	}
+
 	httpClient := &http.Client{
 		Timeout: 5 * time.Second,
 	}
 
-	// This application will call the `app-b` every second
+	// This application will call the endpoint every second
 	ticker := time.NewTicker(time.Second)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://app-b.app-b.svc.cluster.local./hello", nil)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 			if err != nil {
 				panic(err)
 			}

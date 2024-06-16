@@ -93,10 +93,13 @@ func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 		Image:           os.Getenv("IMAGE_TO_DEPLOY_PROXY_INIT"),
 		ImagePullPolicy: v1.PullAlways,
 		SecurityContext: &v1.SecurityContext{
+			RunAsNonRoot: func(b bool) *bool { return &b }(false),
+			RunAsUser:    func(i int64) *int64 { return &i }(0),
 			Capabilities: &v1.Capabilities{
 				Add:  []v1.Capability{"NET_ADMIN", "NET_RAW"},
 				Drop: []v1.Capability{"ALL"},
 			},
+			ReadOnlyRootFilesystem: func(b bool) *bool { return &b }(true),
 		},
 	})
 
@@ -106,8 +109,11 @@ func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 		Image:           os.Getenv("IMAGE_TO_DEPLOY_PROXY"),
 		ImagePullPolicy: v1.PullAlways,
 		SecurityContext: &v1.SecurityContext{
-			RunAsUser:    func(i int64) *int64 { return &i }(1337),
-			RunAsNonRoot: func(b bool) *bool { return &b }(true),
+			RunAsNonRoot:             func(b bool) *bool { return &b }(true),
+			RunAsUser:                func(i int64) *int64 { return &i }(1337),
+			RunAsGroup:               func(i int64) *int64 { return &i }(1337),
+			ReadOnlyRootFilesystem:   func(b bool) *bool { return &b }(true),
+			AllowPrivilegeEscalation: func(b bool) *bool { return &b }(false),
 		},
 		Env: []v1.EnvVar{
 			{
@@ -124,22 +130,24 @@ func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 		},
 	})
 
-	pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
-		Name: "proxy-token",
-		VolumeSource: v1.VolumeSource{
-			Projected: &v1.ProjectedVolumeSource{
-				Sources: []v1.VolumeProjection{
-					{
-						ServiceAccountToken: &v1.ServiceAccountTokenProjection{
-							Audience:          "diy-service-mesh",
-							ExpirationSeconds: func(i int64) *int64 { return &i }(3600),
-							Path:              "token",
+	pod.Spec.Volumes = append(pod.Spec.Volumes,
+		v1.Volume{
+			Name: "proxy-token",
+			VolumeSource: v1.VolumeSource{
+				Projected: &v1.ProjectedVolumeSource{
+					Sources: []v1.VolumeProjection{
+						{
+							ServiceAccountToken: &v1.ServiceAccountTokenProjection{
+								Audience:          "diy-service-mesh",
+								ExpirationSeconds: func(i int64) *int64 { return &i }(3600),
+								Path:              "token",
+							},
 						},
 					},
 				},
 			},
 		},
-	})
+	)
 
 	patch := []map[string]any{
 		{
