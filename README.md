@@ -219,7 +219,7 @@ Accept-Encoding: gzip
 User-Agent: Go-http-client/1.1
 ```
 
-## We are going to implement a simple proxy that will intercept the network requests and responses.
+## Implementing the proxy that will intercept the HTTP/1.1 requests and responses.
 
 ### Why we need a proxy?
 
@@ -284,26 +284,207 @@ The `listen` function is going to listen on the port and call the `accept` funct
 
 ### handleInboundConnection
 
-All the inbound traffic is going to be intercepted by the proxy and we are going to print the request and response and forward the request to the correct service.
+All the inbound traffic is going to be intercepted by the proxy and we are going to print the request forward the request
+to the local destination port and print the response.
 
 ```go
+func handleInboundConnection(c net.Conn) {
+	defer c.Close()
 
+	// Get the original destination
+	_, port, err := getOriginalDestination(c)
+	if err != nil {
+		fmt.Printf("Failed to get original destination: %v\n", err)
+		return
+	}
 
+	fmt.Printf("Inbound connection from %s to port: %d\n", c.RemoteAddr(), port)
 
+	// Read the request
+	req, err := http.ReadRequest(bufio.NewReader(c))
+	if err != nil {
+		fmt.Printf("Failed to read request: %v\n", err)
+		return
+	}
+
+	// Call the local service port
+	upstream, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		fmt.Printf("Failed to dial: %v\n", err)
+		return
+	}
+	defer upstream.Close()
+
+	// Write the request
+	if err := req.Write(io.MultiWriter(upstream, os.Stdout)); err != nil {
+		fmt.Printf("Failed to write request: %v\n", err)
+		return
+	}
+
+	// Read the response
+	resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
+	if err != nil {
+		fmt.Printf("Failed to read response: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Write the response
+	if err := resp.Write(io.MultiWriter(c, os.Stdout)); err != nil {
+		fmt.Printf("Failed to write response: %v\n", err)
+		return
+	}
+
+	// Add a newline for better readability
+	fmt.Println()
+}
+```
+
+The `handleInboundConnection` function first read the destination port to our service,
+iptables is going to set the destination port in the `SO_ORIGINAL_DST` socket option.
+The function `getOriginalDestination` returns the original destination of the TCP connection,
+check the code to see how it works. (This is a Linux specific feature)
+
+After that, we read the request, forward the request to the local service port and read 
+the response and send it back to the client.
+
+For visibility, we are going to print the request and response using `io.MultiWriter` to write to the connection and stdout.
+
+Now our logs are going to look like this:
+
+```bash
+proxy Inbound connection from 10.244.0.115:60296 to port: 8080
+http-server Request #13
+http-server GET /hello HTTP/1.1
+http-server Host: http-server.http-server.svc.cluster.local.
+http-server Accept-Encoding: gzip
+http-server User-Agent: Go-http-client/1.1
+proxy GET /hello HTTP/1.1
+proxy Host: http-server.http-server.svc.cluster.local.
+proxy User-Agent: Go-http-client/1.1
+proxy Accept-Encoding: gzip
+proxy
+proxy HTTP/1.1 200 OK
+proxy Content-Length: 86
+proxy Content-Type: text/plain
+proxy Date: Mon, 17 Jun 2024 20:58:46 GMT
+proxy
+proxy Hello from the http-server service! Hostname: http-server-c6f4776bb-mmw2d Version: 1.0
+```
+
+### handleOutboundConnection
+
+The outbound look very similar to the inbound, but we are going to forward the request to the target service.
+
+```go
+func handleOutboundConnection(c net.Conn) {
+	defer c.Close()
+
+	// Get the original destination
+	ip, port, err := getOriginalDestination(c)
+	if err != nil {
+		fmt.Printf("Failed to get original destination: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Outbound connection to %s:%d\n", ip, port)
+
+	// Read the request
+	req, err := http.ReadRequest(bufio.NewReader(c))
+	if err != nil {
+		fmt.Printf("Failed to read request: %v\n", err)
+		return
+	}
+
+	// Call the external service ip:port
+	upstream, err := net.Dial("tcp", fmt.Sprintf("%s:%d", ip, port))
+	if err != nil {
+		fmt.Printf("Failed to dial: %v\n", err)
+		return
+	}
+	defer upstream.Close()
+
+	// Write the request
+	if err := req.Write(io.MultiWriter(upstream, os.Stdout)); err != nil {
+		fmt.Printf("Failed to write request: %v\n", err)
+		return
+	}
+
+	// Read the response
+	resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
+	if err != nil {
+		fmt.Printf("Failed to read response: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Write the response
+	if err := resp.Write(io.MultiWriter(c, os.Stdout)); err != nil {
+		fmt.Printf("Failed to write response: %v\n", err)
+		return
+	}
+
+	// Add a newline for better readability
+	fmt.Println()
+}
+```
+
+As you can see the only difference is how we are calling the external service.
+
+```go
+	// Call the external service ip:port
+	upstream, err := net.Dial("tcp", fmt.Sprintf("%s:%d", ip, port))
+	if err != nil {
+		fmt.Printf("Failed to dial: %v\n", err)
+		return
+	}
+	defer upstream.Close()
+```
+
+Is important to note that the service resolves the DNS for us, so we only need to provide the IP and the port.
+
+Now the outbound logs are going to look like this:
+
+```bash
+proxy Outbound connection to 10.96.182.169:80
+proxy GET /hello HTTP/1.1
+proxy Host: http-server.http-server.svc.cluster.local.
+proxy User-Agent: Go-http-client/1.1
+proxy Accept-Encoding: gzip
+proxy
+proxy HTTP/1.1 200 OK
+proxy Content-Length: 86
+proxy Content-Type: text/plain
+proxy Date: Mon, 17 Jun 2024 21:04:53 GMT
+proxy
+proxy Hello from the http-server service! Hostname: http-server-c6f4776bb-slpdf Version: 1.0
+http-client Response #16
+http-client HTTP/1.1 200 OK
+http-client Content-Length: 86
+http-client Content-Type: text/plain
+http-client Date: Mon, 17 Jun 2024 21:04:53 GMT
+http-client
+http-client Hello from the http-server service! Hostname: http-server-c6f4776bb-slpdf Version: 1.0
 ```
 
 
+## How we are able to intercept the connections?
 
-We are using port `4000` for the inbound traffic and port `5000` for the outbound traffic.
-In the next steps we are going to add retries, metrics and canary deployments to the proxy and finally mTLS between the services.
+As you can see, we intercept the connections and print the request and response, but how we are able to do that?
 
-## Kubernetes understanding
+The answer is `iptables`, we are going to use the `iptables` to intercept the packets and send them to the proxy.
+
+Before our http-client and http-server starts, we need to configure the `iptables` to intercept each connection and send it to the proxy.
+
+Kubernetes has a feature called `initContainers`, which is a container that runs before the main containers starts.
+
+But before we need to understand how the network works in a Kubernetes pod.
+
+### Kubernetes Pod Networking Understanding
 
 Each kubernetes pod shares the same network between the containers, so we can use the `localhost` to communicate between the containers.
 
-What we are going to do is to intercept all the packets and send always to the proxy except the ones that are going out from the proxy container.
-
-We are going to use the `iptables` to intercept the packets and send them to the proxy.
+What we are going to do is to intercept all the traffic and send always to the proxy except the ones that are going out from the proxy container.
 
 ```go
 func main() {
@@ -340,7 +521,7 @@ func main() {
 
 	for _, cmd := range commands {
 		if err := cmd.Run(); err != nil {
-			fmt.Printf("failed to run command: %v\n", err)
+			panic(fmt.Sprintf("failed to run command %s: %v\n", cmd.String(), err))
 		}
 	}
 
