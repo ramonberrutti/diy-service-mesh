@@ -2,8 +2,8 @@ DESCLAIMER: This is a work in progress, the code is not complete and is not work
 
 # DIY Service Mesh
 
-This is a Do-It-Yourself Service Mesh, which is a simple tutorial for understanding 
-the internals of a service mesh. The goal of this project is to provide a simple, 
+This is a Do-It-Yourself Service Mesh, a simple tutorial for understanding 
+the internals of a service mesh. This project aims to provide a simple, 
 easy-to-understand reference implementation of a service mesh, which can be used 
 to learn about the various concepts and technologies used by a service mesh like Linkerd.
 
@@ -13,7 +13,7 @@ to learn about the various concepts and technologies used by a service mesh like
 - Use Netfilter to intercept and modify network packets.
 - Create a simple control plane to manage the service mesh.
 - Use gRPC to communicate between the proxy and the control plane.
-- How to create a Admision Controller to validate and mutate Kubernetes resources.
+- Create an Admission Controller to validate and mutate Kubernetes resources.
 - Certificate generation flow and mTLS between the services.
 - How HTTP/2 works and how to use it with gRPC to balance the traffic between the services.
 - Add useful features like circuit breaking, retries, timeouts, and load balancing.
@@ -23,11 +23,11 @@ to learn about the various concepts and technologies used by a service mesh like
 ## Some considerations
 
 - Only for learning propose, not a production-ready service mesh.
-- The proxy is going to print many logs to understand what is going on.
-- Use IPTables instead Nftables for simplicity.
+- The proxy will print many logs to understand what is happening.
+- Use IPTables instead of Nftables for simplicity.
 - Keep the code as simple as possible to make it easy to understand.
-- Some Golang errors are ignored for simplicity, in a real-world scenario you should handle them properly.
-- Everything is going to be in the same repository to make it easier to understand the project.
+- Some Golang errors are ignored for simplicity.
+- Everything will be in the same repository to make it easier to understand the project.
 
 ## What is going to be built?
 
@@ -35,11 +35,11 @@ The following components are going to be built:
 
 - **proxy-init**: Configure the network namespace of the pod.
 - **proxy**: This is the data plane of the service mesh, which is responsible for intercepting and modifying network packets.
-- **controller**: This is the control plane of the service mesh, which is responsible to provide the configuration to the data plane.
-- **injector**: This is an Admission Controller for Kubernetes, which is responsible for mutating each pod that need to be meshed.
-- **samples apps**: Four simple applications that are going to communicate with each other. (http-client, http-server, grpc-client, grpc-server)
+- **controller**: This is the control plane of the service mesh, which is responsible for configuring the data plane.
+- **injector**: This is an Admission Controller for Kubernetes, which mutates each pod that needs to be meshed.
+- **samples apps**: Four simple applications will communicate with each other. (http-client, http-server, grpc-client, grpc-server)
 
-## Tools and how to run this project?
+## Tools and Running the project
 
 - [kind](https://kind.sigs.k8s.io/) to create a Kubernetes cluster locally.
 - [Tilt](https://tilt.dev/) to run the project and watch for changes.
@@ -65,10 +65,10 @@ The architecture of the service mesh is composed of the following components:
 
 ![Architecture](./docs/images/architecture.png)
 
-## Creating the http applications
+## Creating the HTTP applications
 
-- **http-client**: This application if going to call the `http-server` service.
-- **http-server**: This application is going to be called by the `http-client` service.
+- **http-client**: This application is going to be called the `http-server` service.
+- **http-server**: This application will be called by the `http-client` service.
 
 In the next steps, `grpc-client` and `grpc-server` are going to be created.
 
@@ -218,22 +218,22 @@ Accept-Encoding: gzip
 User-Agent: Go-http-client/1.1
 ```
 
-## Implementing the proxy that will intercept the HTTP/1.1 requests and responses.
+## Implementing the proxy to intercept the HTTP/1.1 requests and responses.
 
 ### Why need a proxy?
 
-The proxy is going to intercept all of the inbound and outbound traffic of the services. (except explicitly ignored)
-Linkerd has a Rust based proxy called `linkerd2-proxy` and Istio has a C++ based proxy called `Envoy`, 
+The proxy will intercept all of the inbound and outbound traffic of the services. (except explicitly ignored)
+Linkerd has a Rust based proxy called `linkerd2-proxy`, and Istio has a C++ based proxy called `Envoy`, 
 which is a very powerful proxy with a lot of features.
 
-Our proxy is going to be very simple and will be similar to `linkerd2-proxy`.
+The proxy code is going to be very simple and will be similar to `linkerd2-proxy` functionalities.
 
-For now, the proxy is going to listen on two ports, one for the inbound traffic and another for the outbound traffic.
+For now, the proxy will listen on two ports: one for inbound traffic and another for outbound traffic.
 
-- 4000 for the inbound traffic.
-- 5000 for the outbound traffic.
+- **4000** for the inbound traffic.
+- **5000** for the outbound traffic.
 
-This is a basic implementation of the proxy, intercepting http requests and responses.
+This is a basic proxy implementation that intercepts HTTP requests and HTTP responses.
 
 ```go
 func main() {
@@ -278,7 +278,7 @@ func listen(ctx context.Context, addr string, accept func(net.Conn)) error {
 }
 ```
 
-The `listen` function is going to listen on the port and call the `accept` function when a connection is established.
+The `listen` function listens on the port and calls the `accept` function when a connection is established.
 
 
 ### handleInboundConnection
@@ -339,15 +339,16 @@ func handleInboundConnection(c net.Conn) {
 }
 ```
 
-The `handleInboundConnection` function first read the destination port to our service,
-iptables is going to set the destination port in the `SO_ORIGINAL_DST` socket option.
+The `handleInboundConnection` function first reads the destination port to our service,
+iptables will set the destination port using the `SO_ORIGINAL_DST` socket option.
 The function `getOriginalDestination` returns the original destination of the TCP connection,
 check the code to see how it works. (This is a Linux specific feature)
 
 After that, read the request, forward the request to the local service port, read 
 the response and send it back to the client.
 
-For visibility, print the request and response using `io.MultiWriter` to write to the connection and stdout.
+For visibility, print the request and response using `io.MultiWriter` to write 
+to the connection and stdout.
 
 ### handleOutboundConnection
 
@@ -418,25 +419,30 @@ As can be seen, the only difference is in how the external service is called.
 	defer upstream.Close()
 ```
 
-It is important to note that the service resolves the DNS, so only the IP and the port need to be provided.
-
+It is important to note that the service resolves the DNS, so only the IP and 
+the port need to be provided.
 
 ## How are the connections intercepted?
 
 ### Kubernetes Pod Networking Understanding
 
-Each kubernetes pod shares the same network between the containers, so the `localhost` is the same for all the containers in the pod.
+Each kubernetes pod shares the same network between the containers, so the 
+`localhost` is the same for all the containers in the pod.
 
 ### initContainers
 
-Kubernetes has a feature called `initContainers`, which is a container that runs before the main containers starts. These containers need to finish before the main containers starts.
+Kubernetes has a feature called `initContainers`, which is a container that 
+runs before the main containers starts. 
+These containers need to finish before the main containers starts.
 
 ### iptables
 
-The `iptables` is a powerful tool to manage Netfilter in Linux, it can be used to intercept and modify the network packets.
+The `iptables` is a powerful tool to manage Netfilter in Linux, it can be used 
+to intercept and modify the network packets.
 
-Before our http-client and http-server containers starts, the proxy-init is going to configure the `Netfilter` to redirect 
-all the traffic to the proxy inbounds and outbounds ports.
+Before our http-client and http-server containers starts, the proxy-init is 
+going to configure the `Netfilter` to redirect all the traffic to the proxy 
+inbounds and outbounds ports.
 
 ```go
 func main() {
