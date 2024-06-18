@@ -16,28 +16,30 @@ to learn about the various concepts and technologies used by a service mesh like
 - How to create a Admision Controller to validate and mutate Kubernetes resources.
 - Certificate generation flow and mTLS between the services.
 - How HTTP/2 works and how to use it with gRPC to balance the traffic between the services.
+- Add useful features like circuit breaking, retries, timeouts, and load balancing.
+- Add metrics and tracing to the service mesh with OpenTelemetry.
+- Canary deployments.
 
 ## Some considerations
 
-- This is only for learning propose, not a production-ready service mesh.
-- The proxy is going to print the request and response, so we can understand what is happening, in a real-world scenario we shouldn't buffer the request and response and be the most transparent as possible.
-- We are going to use IPTables instead Nftables for simplicity.
-- We are going to keep the code as simple as possible to make it easy to understand.
+- Only for learning propose, not a production-ready service mesh.
+- The proxy is going to print many logs to understand what is going on.
+- Use IPTables instead Nftables for simplicity.
+- Keep the code as simple as possible to make it easy to understand.
 - Some Golang errors are ignored for simplicity, in a real-world scenario you should handle them properly.
+- Everything is going to be in the same repository to make it easier to understand the project.
 
-## What are we going to build?
+## What is going to be built?
 
-We are going to keep the project in a monorepo, which will contain the following components:
+The following components are going to be built:
 
 - **proxy-init**: Configure the network namespace of the pod.
 - **proxy**: This is the data plane of the service mesh, which is responsible for intercepting and modifying network packets.
 - **controller**: This is the control plane of the service mesh, which is responsible to provide the configuration to the data plane.
-- **injector**: This is an Admission Controller for Kubernetes, which is responsible for mutating each pod that we want to use the service mesh.
+- **injector**: This is an Admission Controller for Kubernetes, which is responsible for mutating each pod that need to be meshed.
 - **samples apps**: Four simple applications that are going to communicate with each other. (http-client, http-server, grpc-client, grpc-server)
 
 ## Tools and how to run this project?
-
-We are going to use:
 
 - [kind](https://kind.sigs.k8s.io/) to create a Kubernetes cluster locally.
 - [Tilt](https://tilt.dev/) to run the project and watch for changes.
@@ -65,16 +67,12 @@ The architecture of the service mesh is composed of the following components:
 
 ## Creating the http applications
 
-First we are going to create two simple http applications, one is going to be the client and the other the server.
-Because gRPC is a bit more complex, we are going to learn about H2 and gRPC in the next steps.
-
-We are going to create four applications:
-
 - **http-client**: This application if going to call the `http-server` service.
 - **http-server**: This application is going to be called by the `http-client` service.
 
-http-client:
+In the next steps, `grpc-client` and `grpc-server` are going to be created.
 
+http-client:
 ```go
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -187,8 +185,9 @@ func main() {
 }
 ```
 
-The `http-server` service is going to respond with a message that contains the hostname and the version of the service. 
-We are going to simulate failures by setting the `FAIL_RATE` environment variable.
+The `http-server` service is going to respond with a message that contains the 
+hostname and the version of the service. 
+Failures will be simulated by setting the FAIL_RATE environment variable.
 
 Each service is going to be deployed in a different namespace:
 
@@ -197,7 +196,7 @@ Each service is going to be deployed in a different namespace:
 
 ## Testing the service mesh
 
-We can check the logs of the `app-a` and `app-b` services to see the communication between them.
+Logs for `http-client` and `http-server` pods to see the communication between the services.
 
 http-client logs:
 ```bash
@@ -221,13 +220,13 @@ User-Agent: Go-http-client/1.1
 
 ## Implementing the proxy that will intercept the HTTP/1.1 requests and responses.
 
-### Why we need a proxy?
+### Why need a proxy?
 
-The proxy is going to intercept all of the inbound and outbound traffic of the services. (except that we configure to ignore)
+The proxy is going to intercept all of the inbound and outbound traffic of the services. (except explicitly ignored)
 Linkerd has a Rust based proxy called `linkerd2-proxy` and Istio has a C++ based proxy called `Envoy`, 
 which is a very powerful proxy with a lot of features.
 
-Our proxy is going to be very simple, we are going to use Go to implement it.
+Our proxy is going to be very simple and will be similar to `linkerd2-proxy`.
 
 For now, the proxy is going to listen on two ports, one for the inbound traffic and another for the outbound traffic.
 
@@ -284,7 +283,7 @@ The `listen` function is going to listen on the port and call the `accept` funct
 
 ### handleInboundConnection
 
-All the inbound traffic is going to be intercepted by the proxy and we are going to print the request forward the request
+All the inbound traffic is going to be intercepted by the proxy, print the request, forward the request
 to the local destination port and print the response.
 
 ```go
@@ -345,36 +344,14 @@ iptables is going to set the destination port in the `SO_ORIGINAL_DST` socket op
 The function `getOriginalDestination` returns the original destination of the TCP connection,
 check the code to see how it works. (This is a Linux specific feature)
 
-After that, we read the request, forward the request to the local service port and read 
+After that, read the request, forward the request to the local service port, read 
 the response and send it back to the client.
 
-For visibility, we are going to print the request and response using `io.MultiWriter` to write to the connection and stdout.
-
-Now our logs are going to look like this:
-
-```bash
-proxy Inbound connection from 10.244.0.115:60296 to port: 8080
-http-server Request #13
-http-server GET /hello HTTP/1.1
-http-server Host: http-server.http-server.svc.cluster.local.
-http-server Accept-Encoding: gzip
-http-server User-Agent: Go-http-client/1.1
-proxy GET /hello HTTP/1.1
-proxy Host: http-server.http-server.svc.cluster.local.
-proxy User-Agent: Go-http-client/1.1
-proxy Accept-Encoding: gzip
-proxy
-proxy HTTP/1.1 200 OK
-proxy Content-Length: 86
-proxy Content-Type: text/plain
-proxy Date: Mon, 17 Jun 2024 20:58:46 GMT
-proxy
-proxy Hello from the http-server service! Hostname: http-server-c6f4776bb-mmw2d Version: 1.0
-```
+For visibility, print the request and response using `io.MultiWriter` to write to the connection and stdout.
 
 ### handleOutboundConnection
 
-The outbound look very similar to the inbound, but we are going to forward the request to the target service.
+The outbound look very similar to the inbound, but forward the request to the target service.
 
 ```go
 func handleOutboundConnection(c net.Conn) {
@@ -429,7 +406,7 @@ func handleOutboundConnection(c net.Conn) {
 }
 ```
 
-As you can see the only difference is how we are calling the external service.
+As can be seen, the only difference is in how the external service is called.
 
 ```go
 	// Call the external service ip:port
@@ -441,50 +418,25 @@ As you can see the only difference is how we are calling the external service.
 	defer upstream.Close()
 ```
 
-Is important to note that the service resolves the DNS for us, so we only need to provide the IP and the port.
-
-Now the outbound logs are going to look like this:
-
-```bash
-proxy Outbound connection to 10.96.182.169:80
-proxy GET /hello HTTP/1.1
-proxy Host: http-server.http-server.svc.cluster.local.
-proxy User-Agent: Go-http-client/1.1
-proxy Accept-Encoding: gzip
-proxy
-proxy HTTP/1.1 200 OK
-proxy Content-Length: 86
-proxy Content-Type: text/plain
-proxy Date: Mon, 17 Jun 2024 21:04:53 GMT
-proxy
-proxy Hello from the http-server service! Hostname: http-server-c6f4776bb-slpdf Version: 1.0
-http-client Response #16
-http-client HTTP/1.1 200 OK
-http-client Content-Length: 86
-http-client Content-Type: text/plain
-http-client Date: Mon, 17 Jun 2024 21:04:53 GMT
-http-client
-http-client Hello from the http-server service! Hostname: http-server-c6f4776bb-slpdf Version: 1.0
-```
+It is important to note that the service resolves the DNS, so only the IP and the port need to be provided.
 
 
-## How we are able to intercept the connections?
-
-As you can see, we intercept the connections and print the request and response, but how we are able to do that?
-
-The answer is `iptables`, we are going to use the `iptables` to intercept the packets and send them to the proxy.
-
-Before our http-client and http-server starts, we need to configure the `iptables` to intercept each connection and send it to the proxy.
-
-Kubernetes has a feature called `initContainers`, which is a container that runs before the main containers starts.
-
-But before we need to understand how the network works in a Kubernetes pod.
+## How are the connections intercepted?
 
 ### Kubernetes Pod Networking Understanding
 
-Each kubernetes pod shares the same network between the containers, so we can use the `localhost` to communicate between the containers.
+Each kubernetes pod shares the same network between the containers, so the `localhost` is the same for all the containers in the pod.
 
-What we are going to do is to intercept all the traffic and send always to the proxy except the ones that are going out from the proxy container.
+### initContainers
+
+Kubernetes has a feature called `initContainers`, which is a container that runs before the main containers starts. These containers need to finish before the main containers starts.
+
+### iptables
+
+The `iptables` is a powerful tool to manage Netfilter in Linux, it can be used to intercept and modify the network packets.
+
+Before our http-client and http-server containers starts, the proxy-init is going to configure the `Netfilter` to redirect 
+all the traffic to the proxy inbounds and outbounds ports.
 
 ```go
 func main() {
@@ -496,7 +448,7 @@ func main() {
 		exec.Command("iptables", "-t", "nat", "-P", "OUTPUT", "ACCEPT"),
 		exec.Command("iptables", "-t", "nat", "-P", "POSTROUTING", "ACCEPT"),
 
-		// Create custom chains so we can jump to them
+		// Create custom chains so is possible jump to them
 		exec.Command("iptables", "-t", "nat", "-N", "PROXY_INBOUND"),
 		exec.Command("iptables", "-t", "nat", "-N", "PROXY_OUTBOUND"),
 
@@ -531,11 +483,12 @@ func main() {
 
 Some important points:
 
-- We are using the proxy UID to ignore the outbound traffic from the proxy container. `--uid-owner 1337`
-- We are going to use `SO_ORIGINAL_DST` to get the original destination of the packet.
+- To allow outbound traffic from the proxy container, the `iptables` option `--uid-owner` is used.
+- The use of custom chains is to make it easier to understand the rules and allow to return to the default chains if the rule is not matched.
+- The `REDIRECT` option is used to redirect the traffic to the proxy and is the responsable to add the `SO_ORIGINAL_DST` information to the socket.
 
 
-## Adding the proxy and proxy-init containers to the deployments:
+### Adding the proxy and proxy-init containers to the deployments:
 
 ```yaml
     spec:
@@ -556,23 +509,82 @@ Some important points:
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 1337
-      - name: app-a
-        image: diy-sm-app-a
+      - name: http-client
+        image: diy-sm-http-client
         imagePullPolicy: IfNotPresent
 ```
 
-The same configuration is going to be applied to the `app-b` deployment.
+The same configuration is going to be applied to the `http-server` deployment.
 
 Some important points:
 
-- proxy-init is a init container that is going to configure the network namespace of the pod and finish.
-- We are using the `NET_ADMIN` and `NET_RAW` capabilities in the `proxy-init` container, 
-  without these capabilities we can't use the `iptables` to intercept the packets.
-- We are using the `runAsUser: 1337` in the `proxy` container, so we can ignore the outbound traffic from the proxy container.
+- proxy-init run as init container that is going to configure the network namespace of the pod and exit.
+- `NET_ADMIN` and `NET_RAW` are linux capabilities that are necessary to configure the `Netfilter`,
+  without these capabilities `iptables` can't call the system calls to configure the `Netfilter`.
+- Using the `runAsUser: 1337` in the `proxy` container is very important so the proxy traffic to outside of the pod is allowed.
 
 
-Doing this is not so simple, we want to kubernetes inject the proxy and proxy-init containers in the pod for us.
-Here is where the `Admission Controller` comes in. Learn more about it [here](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/).
+### Logs output for the proxy and the applications
+
+http-server logs:
+
+```bash
+proxy Inbound connection from 10.244.0.115:60296 to port: 8080
+http-server Request #13
+http-server GET /hello HTTP/1.1
+http-server Host: http-server.http-server.svc.cluster.local.
+http-server Accept-Encoding: gzip
+http-server User-Agent: Go-http-client/1.1
+proxy GET /hello HTTP/1.1
+proxy Host: http-server.http-server.svc.cluster.local.
+proxy User-Agent: Go-http-client/1.1
+proxy Accept-Encoding: gzip
+proxy
+proxy HTTP/1.1 200 OK
+proxy Content-Length: 86
+proxy Content-Type: text/plain
+proxy Date: Mon, 17 Jun 2024 20:58:46 GMT
+proxy
+proxy Hello from the http-server service! Hostname: http-server-c6f4776bb-mmw2d Version: 1.0
+```
+
+http-client logs:
+
+```bash
+proxy Outbound connection to 10.96.182.169:80
+proxy GET /hello HTTP/1.1
+proxy Host: http-server.http-server.svc.cluster.local.
+proxy User-Agent: Go-http-client/1.1
+proxy Accept-Encoding: gzip
+proxy
+proxy HTTP/1.1 200 OK
+proxy Content-Length: 86
+proxy Content-Type: text/plain
+proxy Date: Mon, 17 Jun 2024 21:04:53 GMT
+proxy
+proxy Hello from the http-server service! Hostname: http-server-c6f4776bb-slpdf Version: 1.0
+http-client Response #16
+http-client HTTP/1.1 200 OK
+http-client Content-Length: 86
+http-client Content-Type: text/plain
+http-client Date: Mon, 17 Jun 2024 21:04:53 GMT
+http-client
+http-client Hello from the http-server service! Hostname: http-server-c6f4776bb-slpdf Version: 1.0
+```
+
+### Adding manually the proxy-init and proxy containers?
+
+Doing this is not so practical, right?
+
+Kubernetes has a feature called `Admission Controller`, which is a webhook that can validate and mutate the objects before they are persisted in the etcd.
+Learn more about it [here](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/).
+
+But in the next steps, a Mutation Admission Controller will be created to inject the proxy-init and proxy containers into the pods that need to be meshed.
+
+
+
+# Part 2 - Admission Controller
+
 
 ## Creating the Admission Controller
 
@@ -759,18 +771,18 @@ Check the [injector.yaml](./k8s/injector.yaml) file to see the complete configur
 
 ## Testing the Admission Controller
 
-We can deploy the `app-a` and `app-b` services with the `service-mesh: enabled` label and check if the proxy and proxy-init containers are injected in the pod.
+We can deploy the `http-client` and `http-server` services with the `service-mesh: enabled` label and check if the proxy and proxy-init containers are injected in the pod.
 
 ```yaml
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: app-a
+      app: http-client
   template:
     metadata:
       labels:
-        app: app-a
+        app: http-client
         service-mesh: enabled
     spec:
 ```
