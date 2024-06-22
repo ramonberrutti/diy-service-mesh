@@ -71,6 +71,7 @@ func main() {
 
 func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	req := ar.Request
+	// Ignore all requests other than pod creation.
 	if req.Operation != admissionv1.Create || req.Kind.Kind != "Pod" {
 		return &admissionv1.AdmissionResponse{
 			UID:     req.UID,
@@ -79,6 +80,7 @@ func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	}
 
 	var pod v1.Pod
+	// Unmarshal the raw object to the pod.
 	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
 		return &admissionv1.AdmissionResponse{
 			UID: req.UID,

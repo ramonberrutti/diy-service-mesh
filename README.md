@@ -619,65 +619,16 @@ Let's dig into how the Admission Controller works.
 1. The kubelet in the selected node will create the pod in the container runtime.
 
 
-The code is a bit extensive, but we are going to explain the important parts:
+### Admission Controller Code
+
+Full code of the Admission Controller: [injector](./cmd/injector/main.go)
+
+The mutate function processes the AdmissionReview object and returns the AdmissionResponse object with the mutated patch.
 
 ```go
-func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
-
-	var certFile, keyFile = os.Getenv("TLS_CERT_FILE"), os.Getenv("TLS_KEY_FILE")
-	if certFile == "" || keyFile == "" {
-		panic("CERT_FILE and KEY_FILE must be set")
-	}
-
-	// Mutate webhook.
-	mux := http.NewServeMux()
-	mux.HandleFunc("/inject", func(w http.ResponseWriter, r *http.Request) {
-		var a admissionv1.AdmissionReview
-		if err := json.NewDecoder(r.Body).Decode(&a); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if a.Request == nil {
-			http.Error(w, "missing request", http.StatusBadRequest)
-			return
-		}
-
-		a.Response = mutate(&a)
-		a.Request = nil
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(a); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	})
-
-	server := &http.Server{
-		Addr:    ":8443",
-		Handler: mux,
-	}
-
-	g, ctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		<-ctx.Done()
-		return server.Shutdown(context.Background())
-	})
-
-	g.Go(func() error {
-		return server.ListenAndServeTLS(certFile, keyFile)
-	})
-
-	if err := g.Wait(); err != nil {
-		if err != http.ErrServerClosed {
-			panic(err)
-		}
-	}
-}
-
 func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	req := ar.Request
+    // Ignore all requests other than pod creation.
 	if req.Operation != admissionv1.Create || req.Kind.Kind != "Pod" {
 		return &admissionv1.AdmissionResponse{
 			UID:     req.UID,
@@ -686,12 +637,21 @@ func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	}
 
 	var pod v1.Pod
+    // Unmarshal the raw object to the pod.
 	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
 		return &admissionv1.AdmissionResponse{
 			UID: req.UID,
 			Result: &metav1.Status{
 				Message: err.Error(),
 			},
+		}
+	}
+
+	// Check if the pod contains the inject annotation.
+	if v, ok := pod.Annotations["diy-service-mesh/inject"]; !ok || strings.ToLower(v) != "true" {
+		return &admissionv1.AdmissionResponse{
+			UID:     req.UID,
+			Allowed: true,
 		}
 	}
 
@@ -755,15 +715,13 @@ func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 }
 ```
 
-Some important points:
+`IMAGE_TO_DEPLOY_PROXY_INIT` and `IMAGE_TO_DEPLOY_PROXY` are environment variables that `tilt` will update with the last `proxy-init` and `proxy` image respectively.
 
-- We create an https server to receive the requests from the kube-apiserver and return the patched object.
-- The https is necessary because the kube-apiserver only sends the objects to the Admission Controller using https.
-- IMAGE_TO_DEPLOY_PROXY_INIT and IMAGE_TO_DEPLOY_PROXY are the environment variables that we are going to set in the deployment. We are using like this so `tilt` can inject the correct image.
+For complex patch use thi library: https://github.com/evanphx/json-patch 
 
 ## Deploying the Admission Controller
 
-This is a tricky part, we need to create a `MutatingWebhookConfiguration` to tell the kube-apiserver to send the objects to our Admission Controller.
+`MutatingWebhookConfiguration` tells the kube-apiserver to send the pod creation requests to the injector.
 
 ```yaml
 apiVersion: admissionregistration.k8s.io/v1
@@ -777,9 +735,6 @@ webhooks:
       name: service-mesh-injector
       namespace: service-mesh
       path: "/inject"
-  objectSelector:
-    matchLabels:
-      service-mesh: enabled
   rules:
   - operations: ["CREATE"]
     apiGroups: [""]
@@ -792,15 +747,17 @@ webhooks:
 
 Some important points:
 
-- We are missing the `caBundle` in the `clientConfig`, this is the certificate of the Admission Controller, but we are using `kube-webhook-certgen` to generate it.
-- We are using the `objectSelector` to tell the kube-apiserver to send the objects to the Admission Controller only if the label `service-mesh: enabled` is present in the pod.
-- We are using the `rules` to tell the kube-apiserver to send the objects to the Admission Controller only if the operation is `CREATE` and the resource is `pods`.
+- `caBundle` in the `clientConfig` is missing. This is a necessary field because the kube-apiserver only calls the webhook if the certificate is valid.
+- Two jobs, `injector-admission-create` `injector-admission-patch` are going generate the certificates and patch the `MutatingWebhookConfiguration` with the `caBundle`.
+- The `rules` options allow to filter the objects that are going to be sent to the injector.
 
-Check the [injector.yaml](./k8s/injector.yaml) file to see the complete configuration.
+The file [injector.yaml](./k8s/injector.yaml) contains the nesesary resources
+including the Service Account, Role, RoleBinding, ClusterRole, ClusterRoleBinding, 
+Service, Deployment and the Job to generate the certificates.
 
 ## Testing the Admission Controller
 
-We can deploy the `http-client` and `http-server` services with the `service-mesh: enabled` label and check if the proxy and proxy-init containers are injected in the pod.
+Let's modify the `http-client` and `http-server` deployments to add the annotation `diy-service-mesh/inject: "true"`.
 
 ```yaml
 spec:
@@ -812,11 +769,14 @@ spec:
     metadata:
       labels:
         app: http-client
-        service-mesh: enabled
+      annotations:
+        diy-service-mesh/inject: "true"
     spec:
 ```
 
-We can also use annotations, but to keep it simple we are using labels.
+*Important:* the annotation needs to be added to the pod template and not to the deployment.
+
+# Part 3 - Controller (control plane)
 
 ## Controller
 
