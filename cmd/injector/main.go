@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 
 	"golang.org/x/sync/errgroup"
 
@@ -84,6 +85,14 @@ func mutate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 			Result: &metav1.Status{
 				Message: err.Error(),
 			},
+		}
+	}
+
+	// Check if the pod contains the inject annotation.
+	if v, ok := pod.Annotations["diy-service-mesh/inject"]; !ok || strings.ToLower(v) != "true" {
+		return &admissionv1.AdmissionResponse{
+			UID:     req.UID,
+			Allowed: true,
 		}
 	}
 

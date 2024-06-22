@@ -27,6 +27,8 @@ spec:
       labels:
         app: http-server
         service-mesh: enabled
+      annotations:
+        diy-service-mesh/inject: "true"
     spec:
       serviceAccountName: http-server
       automountServiceAccountToken: false

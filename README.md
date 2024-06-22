@@ -65,6 +65,8 @@ The architecture of the service mesh is composed of the following components:
 
 ![Architecture](./docs/images/architecture.png)
 
+# Part 1 - Proxy
+
 ## Creating the HTTP applications
 
 - **http-client**: This application is going to be called the `http-server` service.
@@ -591,10 +593,31 @@ But in the next steps, a Mutation Admission Controller will be created to inject
 
 # Part 2 - Admission Controller
 
-
 ## Creating the Admission Controller
 
-Before kube-apiserver persists the object, it sends the object to the Admission Controller, and we can patch the object before it is persisted.
+Before kube-apiserver persists the object and later be scheduled to a node, 
+the Admission Controller can validate and mutate the object.
+
+The Mutation Admission Controller is going to mutate the pods that have the the
+annotation `diy-service-mesh: true`.
+
+Let's dig into how the Admission Controller works.
+
+
+### Admission Controller Flow
+
+![Admission Controller Flow](./docs/images/admission-controller.png)
+
+
+1. kube-controller or kubectl sends a request to the kube-apiserver to create a pod.
+1. The kube-apiserver sends the request to the Admission Controller. In this case the proxy-injector.
+1. The proxy-injector returns the mutated patch to the kube-apiserver.
+1. Kube-apiserver persists the object in the etcd if the object is valid.
+1. Kube-scheduler will schedule the pod to a node.
+1. Kube-scheduler returns an available node to the kube-apiserver or an error if the pod can't be scheduled.
+1. The kube-apiserver will store the object in the etcd with the selected node.
+1. The kubelet in the selected node will create the pod in the container runtime.
+
 
 The code is a bit extensive, but we are going to explain the important parts:
 

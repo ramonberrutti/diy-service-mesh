@@ -26,7 +26,8 @@ spec:
     metadata:
       labels:
         app: http-client
-        service-mesh: enabled
+      annotations:
+        diy-service-mesh/inject: "true"
     spec:
       serviceAcountName: http-client
       automountServiceAccountToken: false

@@ -93,6 +93,16 @@ spec:
         - name: webhook-certs
           mountPath: /certs
           readOnly: true
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          seccompProfile:
+            type: RuntimeDefault
       volumes:
       - name: webhook-certs
         secret:
@@ -200,9 +210,6 @@ webhooks:
       name: service-mesh-injector
       namespace: service-mesh
       path: "/inject"
-  objectSelector:
-    matchLabels:
-      service-mesh: enabled
   rules:
   - operations: ["CREATE"]
     apiGroups: [""]
